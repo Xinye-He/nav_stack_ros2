@@ -25,6 +25,7 @@
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
+  <depend>stack_msgs</depend>
 
   <!-- System dependencies (via rosdep) -->
   <build_depend>libpcl-all-dev</build_depend>

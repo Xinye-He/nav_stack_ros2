@@ -24,6 +24,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include "visualization_msgs/msg/marker_array.hpp"
+#include "stack_msgs/msg/bale_target.hpp"
 
 class BaleDetectorGround : public rclcpp::Node
 {
@@ -32,20 +33,20 @@ public:
   : Node("bale_detector_ground")
   {
     // 基本参数（可改成 declare_parameter 再从参数服务器读取）
-    min_range_ = 1.5f;   // 关注的水平距离范围
-    max_range_ = 5.0f;
+    min_range_ = 1.0f;   // 关注的水平距离范围
+    max_range_ = 10.0f;
 
     // 草捆尺寸（直径0.6m、长1.2m，对包围盒给宽松范围）
-    bale_min_long_ = 0.5f;   // XY平面包围盒较长边下限
-    bale_max_long_ = 1.2f;   // 较长边上限
-    bale_min_short_ = 0.3f;  // 较短边下限
-    bale_max_short_ = 0.9f;  // 较短边上限
+    bale_min_long_ = 0.3f;   // XY平面包围盒较长边下限
+    bale_max_long_ = 2.0f;   // 较长边上限
+    bale_min_short_ = 0.1f;  // 较短边下限
+    bale_max_short_ = 2.0f;  // 较短边上限
 
-    cluster_tolerance_ = 0.5f;   // 聚类半径
-    cluster_min_size_ = 200;
+    cluster_tolerance_ = 0.3f;   // 聚类半径
+    cluster_min_size_ = 100;
     cluster_max_size_ = 5000;
 
-    ground_dist_thresh_ = 0.15f; // 地面RANSAC拟合距离阈值（m）
+    ground_dist_thresh_ = 0.21f; // 地面RANSAC拟合距离阈值（m）
 
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_points",
@@ -65,6 +66,10 @@ public:
     // 新增：聚类后着色点云
     cluster_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
       "cluster_points", 10);
+
+    // 新增：最近草捆目标
+    bale_target_pub_ = this->create_publisher<stack_msgs::msg::BaleTarget>(
+      "bale_target", 10);
 
     RCLCPP_INFO(this->get_logger(),
                 "BaleDetectorGround subscribed to /rslidar_points");
@@ -91,7 +96,7 @@ private:
       return;
     }
 
-    // 2. 前方 2~10m 的 ROI（在雷达坐标系 XY 平面上）
+    // 2. 前方 设定距离 的 ROI（在雷达坐标系 XY 平面上）
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_roi(new pcl::PointCloud<pcl::PointXYZI>);
     cloud_roi->reserve(cloud_in->size());
 
@@ -116,6 +121,7 @@ private:
       publishEmptyMarkers(msg->header.stamp);
       // 同时也清空聚类点云
       publishEmptyPointClouds(msg->header.stamp);
+      publishEmptyTarget();
       return;
     }
 
@@ -139,6 +145,7 @@ private:
         "No ground plane found, skip this frame.");
       publishEmptyMarkers(msg->header.stamp);
       publishEmptyPointClouds(msg->header.stamp);
+      publishEmptyTarget();
       return;
     }
 
@@ -236,6 +243,7 @@ private:
     if (cloud_nonground->empty()) {
       publishEmptyMarkers(msg->header.stamp);
       publishEmptyPointClouds(msg->header.stamp);
+      publishEmptyTarget();
       return;
     }
 
@@ -288,6 +296,7 @@ private:
     if (cluster_indices.empty()) {
       marker_pub_->publish(marker_array);
       publishEmptyClusterCloud(msg->header.stamp);
+      publishEmptyTarget();
       return;
     }
 
@@ -363,7 +372,7 @@ private:
       // 草捆尺寸初筛
       if (d_long < bale_min_long_ || d_long > bale_max_long_) continue;
       if (d_short < bale_min_short_ || d_short > bale_max_short_) continue;
-      if (dz < 0.4f || dz > 1.0f) continue;  // 高度粗过滤
+      if (dz < 0.53f || dz > 0.8f) continue;  // 高度粗过滤
 
       // 6.3 在“物理水平地面”坐标系下计算水平距离 + 角度
       // 去掉沿地面法向的分量：投影到通过传感器的、与地面平行的平面上
@@ -468,12 +477,24 @@ private:
     if (found_candidate) {
       float angle_deg = best_angle_user * 180.0f / static_cast<float>(M_PI);
 
+      // 发布到 /bale_target
+      if (bale_target_pub_) {
+        stack_msgs::msg::BaleTarget tgt;
+        tgt.distance_m = best_R;
+        tgt.angle_deg  = angle_deg;   // 注意：左负右正，与你栈内 angle_deg 约定一致
+        tgt.valid      = true;
+        bale_target_pub_->publish(tgt);
+      }
+
       RCLCPP_INFO_THROTTLE(
         this->get_logger(), *this->get_clock(), 500,
         "Nearest bale (ground frame): R=%.2f m, angle_user=%.1f deg (left-, right+), "
         "centroid_L=(%.2f, %.2f, %.2f)",
         best_R, angle_deg,
         best_centroid_L.x(), best_centroid_L.y(), best_centroid_L.z());
+    } else {
+      // 虽然上面各处 early-return 已经发过 invalid，这里兜底一次也可以
+      publishEmptyTarget();
     }
   }
 
@@ -518,13 +539,24 @@ private:
     pub->publish(empty_msg);
   }
 
+  void publishEmptyTarget()
+  {
+    if (!bale_target_pub_) return;
+    stack_msgs::msg::BaleTarget msg;
+    msg.distance_m = 0.0f;
+    msg.angle_deg  = 0.0f;
+    msg.valid      = false;
+    bale_target_pub_->publish(msg);
+  }
+
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 
-  // 新增：去地面点云 & 聚类点云发布
+  // 去地面点云 & 聚类点云发布 & 最近草捆目标
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr nonground_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cluster_cloud_pub_;
+  rclcpp::Publisher<stack_msgs::msg::BaleTarget>::SharedPtr bale_target_pub_;
 
   float min_range_;
   float max_range_;

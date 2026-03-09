@@ -172,7 +172,7 @@ class TrajWaypointFollower(Node):
         self.declare_parameter('sign_hysteresis_deg', 1.0)
 
         # SPIN 预停止时间（从低速/高速进入原地旋转前保持 0速0角 的时间）
-        self.declare_parameter('spin_pre_stop_time_s', 0.5)
+        self.declare_parameter('spin_pre_stop_time_s', 1.0)
 
         # 读参数
         path_csv = self.get_parameter('path_csv').get_parameter_value().string_value
@@ -180,6 +180,7 @@ class TrajWaypointFollower(Node):
             self.get_logger().error("path_csv is required.")
             raise SystemExit
 
+        self.path_csv = path_csv
         self.gps_topic = self.get_parameter('gps_topic').value
         self.imu_topic = self.get_parameter('imu_topic').value
 
@@ -279,6 +280,8 @@ class TrajWaypointFollower(Node):
 
         self.waiting_for_task = False
         self.task_done_latch = False
+        self.unload_mode = False
+        self.unload_end_time = 0.0
 
         # Drive state
         self.drive_state = self.DS_PAUSED
@@ -293,6 +296,8 @@ class TrajWaypointFollower(Node):
         self.create_subscription(Float32, '/gps/ground_speed_mps',
                                  lambda m: setattr(self, 'last_gps_speed', float(m.data)),
                                  qos_profile_sensor_data)
+        # 新增：重启路径 / 切换 CSV
+        self.create_subscription(Bool, '/restart_path', self.on_restart_path, 1)
 
         # Commands & task topics
         self.create_subscription(Bool,  self.task_done_topic, self.on_task_done, 1)
@@ -300,7 +305,10 @@ class TrajWaypointFollower(Node):
         self.create_subscription(Bool,  '/abort',            self.on_abort,     1)
 
         # 任务等待状态输出
-        self.pub_task_wait = self.create_publisher(Bool, '/at_task_waiting', 1)
+        qos_latched = QoSProfile(depth=1)
+        qos_latched.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
+
+        self.pub_task_wait = self.create_publisher(Bool, '/at_task_waiting', qos_latched)
 
         # StackCommand 输出（给 CAN 执行节点用）
         self.pub_traj_cmd = self.create_publisher(StackCommand, '/stack_cmd/traj', 1)
@@ -340,6 +348,64 @@ class TrajWaypointFollower(Node):
 
         self.get_logger().info(
             f"Loaded {len(self.waypoints_xy)} waypoints. GPS:{self.gps_topic}, RTK:{self.rtk_heading_topic}"
+        )
+
+    def on_restart_path(self, msg: Bool):
+        if not bool(msg.data):
+            return
+        self.get_logger().info("Restart path requested, reloading CSV...")
+
+        try:
+            self.reload_path()
+            # 重置状态
+            self.seg_idx = 0
+            self.waiting_for_task = False
+            if hasattr(self, 'unload_mode'):
+                self.unload_mode = False
+                self.unload_end_time = 0.0
+            self.drive_state = self.DS_RUNNING
+            self._pub_waiting(False)
+            self.get_logger().info("Path reloaded, seg_idx=0, drive_state=RUNNING")
+        except Exception as e:
+            self.get_logger().error(f"Reload path failed: {e}")
+
+    def reload_path(self):
+        """
+        从 self.path_csv 重新读取轨迹点，重建 self.geo / self.waypoints_xy / self.global_path。
+        如果你希望换文件，可以先通过别的节点修改参数 path_csv，再调用 /restart_path。
+        """
+        if not hasattr(self, 'path_csv') or not self.path_csv:
+            raise RuntimeError("path_csv not set, cannot reload")
+
+        llh = self.load_csv(self.path_csv)
+        if len(llh) < 1:
+            raise RuntimeError(f"No valid waypoints in CSV: {self.path_csv}")
+        llh.sort(key=lambda x: x[0])
+
+        # 重新设置 ENU 原点（用新 CSV 第一个点）
+        lat0, lon0 = llh[0][1], llh[0][2]
+        self.geo = LLA2ENU(lat0, lon0, 0.0)
+
+        # 重建 ENU 路点
+        self.waypoints_xy.clear()
+        for _, lat, lon, hdg_deg_csv, pt_type in llh:
+            x, y, _ = self.geo.lla_to_enu(lat, lon, 0.0)
+            yaw_enu = heading_csv_deg_to_enu_rad(hdg_deg_csv)
+            self.waypoints_xy.append((x, y, yaw_enu, int(pt_type)))
+
+        # 重建 global_path（供 RViz 显示）
+        self.global_path.poses.clear()
+        for (x, y, _, _) in self.waypoints_xy:
+            ps = PoseStamped()
+            ps.header.frame_id = self.map_frame
+            ps.pose.position.x = float(x)
+            ps.pose.position.y = float(y)
+            ps.pose.orientation.w = 1.0
+            self.global_path.poses.append(ps)
+
+        self.get_logger().info(
+            f"Reloaded path from {self.path_csv}, waypoints={len(self.waypoints_xy)}, "
+            f"origin=({lat0:.7f},{lon0:.7f})"
         )
 
     # ---- helpers ----
@@ -444,6 +510,22 @@ class TrajWaypointFollower(Node):
         self.last_time = now
 
         if self.cur_x is None or self.cur_y is None or self.cur_yaw is None:
+            return
+
+        # 如果处于卸货模式，优先处理卸货计时
+        if self.unload_mode:
+            if now_sec < self.unload_end_time:
+                # 保持 0 速、0 角，卸货位=1
+                self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, 0.0,
+                                      unload=True)
+            else:
+                # 卸货计时结束，清零卸货位，退出卸货模式
+                self.unload_mode = False
+                self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, 0.0,
+                                      unload=False)
+                self.get_logger().info("Unload finished, unload bit cleared")
+            # 仍然发布 TF 方便 RViz 看位置
+            self.publish_map_to_odom(px, py, self.cur_yaw)
             return
 
         # DR integrate
@@ -587,6 +669,9 @@ class TrajWaypointFollower(Node):
         if pt_type_j == 1:
             hdg_err_to_wp = wrap_pi(yaw_wp - self.cur_yaw)
             hdg_err_to_wp_deg = math.degrees(hdg_err_to_wp)
+            
+            is_last_point = (j == n - 1)  # 最后一个点
+
             if dist_to_next <= self.wp_reached_dist:
                 if abs(hdg_err_to_wp_deg) > self.stop_turn_tol_deg:
                     # 用 SPIN 逻辑对正
@@ -605,14 +690,28 @@ class TrajWaypointFollower(Node):
                     self.publish_map_to_odom(px, py, self.cur_yaw)
                     return
                 else:
-                    self.waiting_for_task = True
-                    self.drive_state = self.DS_PAUSED
-                    self.spin_state = 'IDLE'
-                    self.angle_sign = 0
-                    self._pub_waiting(True)
-                    self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next)
-                    self.publish_map_to_odom(px, py, self.cur_yaw)
-                    return
+                    # 已对正
+                    if is_last_point:
+                        # ---- 最后一个任务点：进入卸货模式 ----
+                        self.unload_mode = True
+                        self.unload_end_time = now_sec + 50.0  # 50秒
+                        self.drive_state = self.DS_PAUSED
+                        # 不进入 waiting_for_task，防止草捆对准块接管
+                        self._pub_waiting(False)
+                        self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next,
+                                              unload=True)
+                        self.get_logger().info("Enter unload mode at last waypoint, unload=1 for 50s")
+                        self.publish_map_to_odom(px, py, self.cur_yaw)
+                        return
+                    else:
+                        self.waiting_for_task = True
+                        self.drive_state = self.DS_PAUSED
+                        self.spin_state = 'IDLE'
+                        self.angle_sign = 0
+                        self._pub_waiting(True)
+                        self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next)
+                        self.publish_map_to_odom(px, py, self.cur_yaw)
+                        return
             # 未到点：继续正常控制
 
         # 普通点：段切换
@@ -793,15 +892,22 @@ class TrajWaypointFollower(Node):
                              min(self.vcu_angle_move_limit_deg, angle_send_deg))
         self.publish_traj_cmd(pre_kmh, angle_send_deg, dist)
 
-    def publish_traj_cmd(self, pre_kmh: float, angle_deg: float, dist_m: float):
+    def publish_traj_cmd(self, 
+                         pre_kmh: float, 
+                         angle_deg: float, 
+                         dist_m: float,
+                         pick: bool = False,
+                         unload: bool = False,
+                         dump: bool = False,
+                         pick_action: bool = False):
         cmd = StackCommand()
         cmd.pre_speed_kmh = float(pre_kmh)
         cmd.angle_deg = float(angle_deg)
         cmd.dist_to_target_m = float(dist_m)
-        cmd.pick = False
-        cmd.unload = False
-        cmd.dump = False
-        cmd.pick_action = False
+        cmd.pick = bool(pick)
+        cmd.unload = bool(unload)
+        cmd.dump = bool(dump)
+        cmd.pick_action = bool(pick_action)
         cmd.valid = True
         self.pub_traj_cmd.publish(cmd)
 

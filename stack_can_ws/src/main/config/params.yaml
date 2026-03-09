@@ -1,3 +1,11 @@
+geofence_monitor:
+  ros__parameters:
+    fence_csv: "/root/stack_can_ws/data/fence.csv"
+    gps_topic: "/fix_center"          # 你用于控制的GNSS中心点
+    warn_margin_m: 2.0                # 距离边界<5m进入WARN
+    check_period_s: 0.2
+    abort_on_outside: true
+
 traj_waypoint_follower:
   ros__parameters:
     # 路径与传感器

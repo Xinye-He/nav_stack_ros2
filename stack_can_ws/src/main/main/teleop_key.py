@@ -14,6 +14,7 @@ teleop_key: keyboard teleop + mode control
     t -> TOGGLE 自动循迹 / 手动 teleop (通过 /teleop_active)
          teleop_active = True  -> 手动 teleop (通过 /stack_cmd/teleop 控制)
          teleop_active = False -> 自动循迹 (跟随 /stack_cmd/traj)
+    n -> reload .csv
 
   Teleop 速度 (pre_speed_kmh)：
     0 ->  0 km/h
@@ -54,6 +55,7 @@ class TeleopKey(Node):
         self.pub_task_done   = self.create_publisher(Bool,  '/task_done', 1)
         self.pub_teleop_act  = self.create_publisher(Bool,  '/teleop_active', 1)
         self.pub_teleop_cmd  = self.create_publisher(StackCommand, '/stack_cmd/teleop', 1)
+        self.pub_restart_path = self.create_publisher(Bool, '/restart_path', 1)
 
         # 内部状态
         self.drive_state     = 1      # 0=PAUSE(不用),1=RUN,2=ESTOP；默认 RUN
@@ -148,6 +150,21 @@ class TeleopKey(Node):
         if not c:
             return
         c = c.lower()
+
+        # -------- restart_path  --------
+        if c == 'n':
+            if not self.debounce(c):
+                return
+            # 发一次 restart_path=True
+            self.pub_restart_path.publish(Bool(data=True))
+            self.get_logger().info("Request restart path (/restart_path=True)")
+
+            # 按你之前规划：切到自动循迹
+            self.drive_state = 1  # RUN
+            self.publish_drive_cmd()
+            self.teleop_active = False  # False=自动循迹，True=手动
+            self.publish_teleop_active()
+            return
 
         # -------- ESTOP --------
         if c == 'x':

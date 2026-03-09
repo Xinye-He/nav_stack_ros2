@@ -7,7 +7,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
 from std_msgs.msg import UInt8, Bool
-from stack_msgs.msg import StackCommand
+from stack_msgs.msg import StackCommand, StackCanStatus
+from builtin_interfaces.msg import Time
 
 try:
     import can
@@ -95,6 +96,7 @@ class StackCanExecutor(Node):
 
         # 定时器：20Hz 输出 CAN
         self.create_timer(0.05, self.loop)
+        self.pub_can_status = self.create_publisher(StackCanStatus, '/stack_can/status', 10)
 
         self.get_logger().info("StackCanExecutor initialized")
 
@@ -229,6 +231,41 @@ class StackCanExecutor(Node):
         payload[5] = byte5
         payload[6] = byte6
         payload[7] = 0x00
+
+        # --- 发布 StackCanStatus 到 /stack_can/status ---
+        status = StackCanStatus()
+        status.stamp = self.get_clock().now().to_msg()
+        status.id = int(self.can_id_status)
+        status.is_extended = bool(self.can_extended)
+
+        # 原始 payload
+        status.data = list(payload)  # uint8[8]
+
+        # 解码字段（供复盘/可视化）
+        status.dist_m = float(dist_raw) * 0.2
+
+        # 方向角：从angle_raw还原，0~359 -> -180~+180，再以右正左负
+        steer_deg = float(angle_raw) - 180.0
+        if steer_deg > 180.0:
+            steer_deg -= 360.0
+        elif steer_deg < -180.0:
+            steer_deg += 360.0
+        status.steer_deg = steer_deg
+
+        # 速度：用同样的 offset/res 反算
+        status.speed_kmh = float(speed_raw) * self.vcu_speed_raw_res_kmh_per_lsb + self.vcu_speed_raw_offset_kmh
+
+        # 各位标志，和 send_can() 里计算 byte5/byte6 时保持一致
+        status.pick        = bool(byte5 & 0x01)
+        status.unload      = bool(byte5 & (0x01 << 2))
+        status.remote      = bool(byte5 & (0x01 << 4))
+        status.dump        = bool(byte5 & (0x01 << 5))
+        status.pick_action = bool(byte5 & (0x01 << 6))
+
+        status.estop       = bool(byte6 & 0x01)
+        status.drive       = bool(byte6 & (0x01 << 1))
+
+        self.pub_can_status.publish(status)
 
         try:
             msg = can.Message(arbitration_id=self.can_id_status,

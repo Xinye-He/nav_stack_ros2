@@ -9,8 +9,6 @@ from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import Bool, UInt8
-from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Point
 
 
 def wrap_pi(a: float) -> float:
@@ -23,8 +21,9 @@ def wrap_pi(a: float) -> float:
 
 class LLA2ENU:
     """
-    简单 LLA->ENU 转换，和你现有栈中的用法一致。
+    与你现有栈一致的 LLA->ENU 转换类。
     """
+
     a = 6378137.0
     f = 1.0 / 298.257223563
     e2 = f * (2 - f)
@@ -39,6 +38,7 @@ class LLA2ENU:
         cphi = math.cos(self.lat0)
         slam = math.sin(self.lon0)
         clam = math.cos(self.lon0)
+        # ECEF->ENU 旋转矩阵
         self.Re = [
             [-slam,            clam,           0.0],
             [-sphi*clam, -sphi*slam,  cphi],
@@ -82,7 +82,9 @@ def point_in_polygon(px: float, py: float, poly: List[Tuple[float, float]]) -> b
     for i in range(n):
         x1, y1 = poly[i]
         x2, y2 = poly[(i + 1) % n]
+        # 判断 y 在边的两个端点 y 之间（半开区间避免重复）
         if ((y1 > py) != (y2 > py)):
+            # 计算交点 x 坐标
             x_inter = (x2 - x1) * (py - y1) / (y2 - y1 + 1e-9) + x1
             if px < x_inter:
                 inside = not inside
@@ -93,7 +95,7 @@ def distance_point_to_segment(px: float, py: float,
                               x1: float, y1: float,
                               x2: float, y2: float) -> float:
     """
-    点到线段的最短距离。
+    点到线段的最短距离（欧氏距离）
     """
     vx = x2 - x1
     vy = y2 - y1
@@ -115,14 +117,13 @@ def distance_point_to_segment(px: float, py: float,
 
 class GeofenceMonitor(Node):
     """
-    电子围栏监控 + RViz 可视化：
+    电子围栏监控：
       - 从 fence_csv 加载多边形围栏点（经纬度），转成 ENU 多边形；
       - 订阅 GPS (NavSatFix)，实时将车位置转为 ENU 点；
       - 判断是否在多边形内 + 距离边界的最小距离；
       - 发布:
           /geofence_state (UInt8): 0=inside, 1=warn, 2=outside/unknown
           /geofence_ok    (Bool):  True=inside且距离>warn_margin, False=warn或outside
-          /geofence_marker (Marker): 围栏 LINE_STRIP，可在 RViz2 中显示
       - 当 inside/warn -> outside 转变时，触发一次 /abort True (ESTOP)。
     """
 
@@ -139,12 +140,6 @@ class GeofenceMonitor(Node):
         self.declare_parameter('warn_margin_m', 5.0)       # 距离边界 < warn_margin -> WARN
         self.declare_parameter('check_period_s', 0.2)      # 检查周期
         self.declare_parameter('abort_on_outside', True)   # 越界是否触发 /abort
-        self.declare_parameter('frame_id', 'map')          # 在RViz中使用的坐标系名称
-        self.declare_parameter('line_width', 0.3)          # 围栏线宽
-        self.declare_parameter('color_r', 1.0)
-        self.declare_parameter('color_g', 0.0)
-        self.declare_parameter('color_b', 0.0)
-        self.declare_parameter('color_a', 0.7)
 
         fence_csv = self.get_parameter('fence_csv').get_parameter_value().string_value
         if not fence_csv:
@@ -155,12 +150,6 @@ class GeofenceMonitor(Node):
         self.warn_margin_m = float(self.get_parameter('warn_margin_m').value)
         self.check_period_s = float(self.get_parameter('check_period_s').value)
         self.abort_on_outside = bool(self.get_parameter('abort_on_outside').value)
-        self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
-        self.line_width = float(self.get_parameter('line_width').value)
-        self.color_r = float(self.get_parameter('color_r').value)
-        self.color_g = float(self.get_parameter('color_g').value)
-        self.color_b = float(self.get_parameter('color_b').value)
-        self.color_a = float(self.get_parameter('color_a').value)
 
         # 读取围栏点并构建 ENU 多边形
         ll = self.load_fence_csv(fence_csv)
@@ -168,7 +157,7 @@ class GeofenceMonitor(Node):
             self.get_logger().error(f"Need at least 3 points in fence_csv: {fence_csv}")
             raise SystemExit
 
-        # 使用第一个点作为 ENU 原点（建议与路径CSV首点一致，便于在 map 中对齐）
+        # 使用第一个点作为 ENU 原点
         lat0, lon0 = ll[0]
         self.geo = LLA2ENU(lat0, lon0, 0.0)
 
@@ -179,7 +168,7 @@ class GeofenceMonitor(Node):
 
         self.get_logger().info(
             f"Geofence loaded from {fence_csv}, vertices={len(self.fence_xy)}, "
-            f"origin=({lat0:.7f},{lon0:.7f}), frame_id={self.frame_id}"
+            f"origin=({lat0:.7f},{lon0:.7f})"
         )
 
         # 当前位置（ENU）
@@ -189,16 +178,13 @@ class GeofenceMonitor(Node):
         # 订阅 GPS
         self.create_subscription(NavSatFix, self.gps_topic, self.on_gps, 10)
 
-        # latched QoS 用于状态话题和 marker（RViz 启动后也能看到）
+        # latched QoS 用于状态话题
         qos_latched = QoSProfile(depth=1)
         qos_latched.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
 
         # 发布状态
         self.pub_state = self.create_publisher(UInt8, '/geofence_state', qos_latched)
         self.pub_ok    = self.create_publisher(Bool,  '/geofence_ok',    qos_latched)
-
-        # 发布围栏 Marker
-        self.pub_marker = self.create_publisher(Marker, '/geofence_marker', qos_latched)
 
         # 触发 ESTOP 的 /abort
         self.pub_abort = self.create_publisher(Bool, '/abort', 1)
@@ -208,9 +194,6 @@ class GeofenceMonitor(Node):
 
         # 定时器
         self.create_timer(self.check_period_s, self.check_loop)
-
-        # 一启动就发布一次围栏 Marker（latched），RViz 随时能看到
-        self.publish_fence_marker()
 
         self.get_logger().info(
             f"GeofenceMonitor started. GPS:{self.gps_topic}, warn_margin={self.warn_margin_m} m"
@@ -250,52 +233,6 @@ class GeofenceMonitor(Node):
         self.px_enu = x
         self.py_enu = y
 
-    # ---------- 发布围栏 Marker ----------
-    def publish_fence_marker(self):
-        if not self.fence_xy:
-            return
-        marker = Marker()
-        marker.header.frame_id = self.frame_id
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "geofence"
-        marker.id = 0
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-
-        # 线条宽度
-        marker.scale.x = float(self.line_width)
-        # 颜色
-        marker.color.r = float(self.color_r)
-        marker.color.g = float(self.color_g)
-        marker.color.b = float(self.color_b)
-        marker.color.a = float(self.color_a)
-
-        # 不设置位姿偏移，直接在 frame_id 坐标系下作为 ENU 点使用
-        marker.pose.orientation.w = 1.0
-
-        # 填充多边形顶点
-        for (x, y) in self.fence_xy:
-            p = Point()
-            p.x = float(x)
-            p.y = float(y)
-            p.z = 0.0
-            marker.points.append(p)
-        # 关闭多边形（首尾连线）
-        if len(self.fence_xy) > 0:
-            x0, y0 = self.fence_xy[0]
-            p0 = Point()
-            p0.x = float(x0)
-            p0.y = float(y0)
-            p0.z = 0.0
-            marker.points.append(p0)
-
-        # lifetime=0 表示永久
-        marker.lifetime.sec = 0
-        marker.lifetime.nanosec = 0
-
-        self.pub_marker.publish(marker)
-        self.get_logger().info("Published geofence marker on /geofence_marker")
-
     # ---------- 检查逻辑 ----------
     def check_loop(self):
         # 没有位置就视为 unknown/outside
@@ -308,6 +245,7 @@ class GeofenceMonitor(Node):
 
         inside = point_in_polygon(px, py, self.fence_xy)
         if not inside:
+            # 越界
             self.set_state(self.STATE_OUT, ok=False, reason="outside polygon")
             return
 
@@ -315,8 +253,10 @@ class GeofenceMonitor(Node):
         dmin = self.compute_min_distance_to_edges(px, py, self.fence_xy)
 
         if dmin < self.warn_margin_m:
+            # 临近边界
             self.set_state(self.STATE_WARN, ok=False, reason=f"near boundary, dmin={dmin:.2f}m")
         else:
+            # 安全区
             self.set_state(self.STATE_INSIDE, ok=True, reason=f"inside, dmin={dmin:.2f}m")
 
     def compute_min_distance_to_edges(self,
@@ -355,10 +295,11 @@ class GeofenceMonitor(Node):
     def trigger_abort_once(self):
         """
         越界时发一次 /abort True。
-        当前版本不做自动解锁，需要人工/上层逻辑清除。
+        可根据需要扩展成带复位逻辑（目前不自动清除）。
         """
         self.pub_abort.publish(Bool(data=True))
         self.get_logger().warn("Geofence: publish /abort = True (ESTOP)")
+        # 如果你希望自动清除，可在恢复 inside 后再发 False，这里先不自动解锁。
 
 
 def main(args=None):

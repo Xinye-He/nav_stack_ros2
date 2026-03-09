@@ -45,9 +45,11 @@ rosbag2_*/
 **large_files/
 lidar_ws/
 stack_can_ws/data/lidar_rosbag
-
+stack_can_ws/bags
+*.bin
 
 # Ignore Docker build contexts and workspaces
 docker/dockerfile/ros2_ws/
 docker/dockerfile/wit_ros2_imu/
+docker/.ipynb_checkpoints/
 lidar_ws/

@@ -22,6 +22,7 @@ find_package(PCL REQUIRED COMPONENTS common filters segmentation search)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
+find_package(stack_msgs REQUIRED)
 
 # 头文件路径（rs_driver 为头文件库，加入其源码路径即可）
 include_directories(
@@ -78,6 +79,7 @@ ament_target_dependencies(bale_detector
   tf2_ros
   geometry_msgs
   visualization_msgs
+  stack_msgs
 )
 target_link_libraries(bale_detector
   ${PCL_LIBRARIES}

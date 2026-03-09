@@ -40,7 +40,7 @@ done
 DISPLAY_DEVICE=""
 
 if [ -n "$DISPLAY" ]; then
-	sudo xhost +si:localuser:root
+	xhost +si:localuser:root
 	DISPLAY_DEVICE=" -e DISPLAY=$DISPLAY -v /tmp/.X11-unix/:/tmp/.X11-unix "
 fi
 
@@ -65,7 +65,7 @@ print_var "DISPLAY_DEVICE"
 
 cat /proc/device-tree/model > /tmp/nv_jetson_model
 
-sudo docker run --runtime nvidia -it --rm \
+docker run --runtime nvidia -it --rm \
 	--privileged \
 	--name nav_stack_ros2 \
 	--network host \
@@ -75,7 +75,7 @@ sudo docker run --runtime nvidia -it --rm \
 	-v /tmp/nv_jetson_model:/tmp/nv_jetson_model \
 	-v /var/run/dbus:/var/run/dbus \
 	-v /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket \
-	-v /home/xinye30/nav_stack_ros2/lidar_ws:/root/lidar_ws \
+	-v /home/xinye30/lidar_rosbag:/root/lidar_rosbag \
 	-v /home/xinye30/nav_stack_ros2/stack_can_ws:/root/stack_can_ws \
 	--volume /dev:/dev \
 	--device /dev \

@@ -223,7 +223,7 @@ private:
           cur_s = v;
         }
         double dt_ms = (last_ts_s > 0.0) ? (cur_s - last_ts_s) * 1e3 : 0.0;
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                              "RS raw_ts≈%.6f s, dt=%.2f ms", cur_s, dt_ms);
         last_ts_s = cur_s;
       }
