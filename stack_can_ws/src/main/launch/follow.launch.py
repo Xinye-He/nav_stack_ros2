@@ -1,8 +1,9 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, EnvironmentVariable
+from launch.substitutions import LaunchConfiguration, EnvironmentVariable,ExecuteProcess
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
+import datetime
 import os
 
 
@@ -13,6 +14,31 @@ def generate_launch_description():
     default_yaml = os.path.join(pkg_share, 'config', 'params.yaml')
     default_yaml_env = EnvironmentVariable(name='GPS_PID_PARAMS_FILE', default_value=default_yaml)
     params_file = LaunchConfiguration('params_file')
+
+    # --- 生成 bag 文件名 ---
+    # 存到工作空间下一个 bags 目录，例如 ~/stack_can_ws/bags/stack_20260116_123456
+    home = os.path.expanduser('~')
+    bag_dir = os.path.join(home, 'stack_can_ws', 'bags')
+    os.makedirs(bag_dir, exist_ok=True)
+    bag_name = 'stack_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    bag_path = os.path.join(bag_dir, bag_name)
+
+    # --- ros2 bag record 进程 ---
+    bag_record = ExecuteProcess(
+        cmd=[
+            'ros2', 'bag', 'record',
+            '-o', bag_path,
+            '/stack_can/status',
+            '/stack_cmd/traj',
+            '/stack_cmd/teleop',
+            '/stack_cmd/bale',
+            '/drive_cmd',
+            '/at_task_waiting',
+            '/bale_active',
+            '/bale_target',
+        ],
+        output='screen'
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
