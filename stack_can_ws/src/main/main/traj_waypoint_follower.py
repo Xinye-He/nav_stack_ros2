@@ -280,8 +280,11 @@ class TrajWaypointFollower(Node):
 
         self.waiting_for_task = False
         self.task_done_latch = False
+
         self.unload_mode = False
         self.unload_end_time = 0.0
+        self.unload_reset_end_time = 0.0
+        self.unload_finished_once = False
 
         # Drive state
         self.drive_state = self.DS_PAUSED
@@ -363,6 +366,8 @@ class TrajWaypointFollower(Node):
             if hasattr(self, 'unload_mode'):
                 self.unload_mode = False
                 self.unload_end_time = 0.0
+                self.unload_reset_end_time = 0.0
+                self.unload_finished_once = False
             self.drive_state = self.DS_RUNNING
             self._pub_waiting(False)
             self.get_logger().info("Path reloaded, seg_idx=0, drive_state=RUNNING")
@@ -514,18 +519,36 @@ class TrajWaypointFollower(Node):
 
         # 如果处于卸货模式，优先处理卸货计时
         if self.unload_mode:
+            self.drive_state = self.DS_PAUSED
+            self.waiting_for_task = False
+            self._pub_waiting(False)
+
+            # 阶段1：持续保持 unload=True
             if now_sec < self.unload_end_time:
-                # 保持 0 速、0 角，卸货位=1
-                self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, 0.0,
-                                      unload=True)
+                self.publish_traj_cmd(
+                    self.vcu_speed_stop_kmh, 0.0, 0.0,
+                    unload=True
+                )
+
+            # 阶段2：持续一小段时间发送 unload=False，确保VCU收到复位
+            elif now_sec < self.unload_reset_end_time:
+                self.publish_traj_cmd(
+                    self.vcu_speed_stop_kmh, 0.0, 0.0,
+                    unload=False
+                )
+
+            # 完成：退出卸货模式，并锁存“已卸货完成”
             else:
-                # 卸货计时结束，清零卸货位，退出卸货模式
                 self.unload_mode = False
-                self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, 0.0,
-                                      unload=False)
-                self.get_logger().info("Unload finished, unload bit cleared")
-            # 仍然发布 TF 方便 RViz 看位置
-            self.publish_map_to_odom(px, py, self.cur_yaw)
+                self.unload_finished_once = True
+                self.publish_traj_cmd(
+                    self.vcu_speed_stop_kmh, 0.0, 0.0,
+                    unload=False
+                )
+                self.get_logger().info("Unload finished, unload reset done, latch unload_finished_once=True")
+
+            # 这里不要用尚未定义的 px/py，直接用当前位置
+            self.publish_map_to_odom(self.cur_x, self.cur_y, self.cur_yaw)
             return
 
         # DR integrate
@@ -692,15 +715,34 @@ class TrajWaypointFollower(Node):
                 else:
                     # 已对正
                     if is_last_point:
-                        # ---- 最后一个任务点：进入卸货模式 ----
+                        # 已经完成过最后点卸货：只保持停车，不再重复进入卸货模式
+                        if self.unload_finished_once:
+                            self.drive_state = self.DS_PAUSED
+                            self.waiting_for_task = False
+                            self.spin_state = 'IDLE'
+                            self.angle_sign = 0
+                            self._pub_waiting(False)
+                            self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next, unload=False)
+                            self.publish_map_to_odom(px, py, self.cur_yaw)
+                            return
+
+                        # ---- 第一次到最后一个任务点：进入卸货模式 ----
                         self.unload_mode = True
-                        self.unload_end_time = now_sec + 50.0  # 50秒
+                        self.unload_end_time = now_sec + 50.0            # 卸货保持 50 秒
+                        self.unload_reset_end_time = self.unload_end_time + 2.0  # 再给 2 秒显式复位
                         self.drive_state = self.DS_PAUSED
+                        self.waiting_for_task = False
+                        self.spin_state = 'IDLE'
+                        self.angle_sign = 0
+
                         # 不进入 waiting_for_task，防止草捆对准块接管
                         self._pub_waiting(False)
-                        self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next,
-                                              unload=True)
-                        self.get_logger().info("Enter unload mode at last waypoint, unload=1 for 50s")
+
+                        self.publish_traj_cmd(
+                            self.vcu_speed_stop_kmh, 0.0, dist_to_next,
+                            unload=True
+                        )
+                        self.get_logger().info("Enter unload mode at last waypoint, unload=1 for 50s then unload=0 for 2s")
                         self.publish_map_to_odom(px, py, self.cur_yaw)
                         return
                     else:
