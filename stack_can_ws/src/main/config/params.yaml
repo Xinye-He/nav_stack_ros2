@@ -51,7 +51,7 @@ traj_waypoint_follower:
     dr_use_gps_speed: true
 
     # VCU 离散控制
-    vcu_speed_fast_kmh: 8.0
+    vcu_speed_fast_kmh: 4.0
     vcu_speed_slow_kmh: 4.0
     vcu_speed_stop_kmh: 0.0
 
@@ -112,4 +112,4 @@ bale_align_controller:
     max_dist_m: 15.0
     target_timeout_s: 0.50
 
-    pick_action_hold_s: 30.0
+    pick_action_hold_s: 20.0

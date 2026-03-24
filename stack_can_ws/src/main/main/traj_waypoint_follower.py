@@ -728,7 +728,7 @@ class TrajWaypointFollower(Node):
 
                         # ---- 第一次到最后一个任务点：进入卸货模式 ----
                         self.unload_mode = True
-                        self.unload_end_time = now_sec + 50.0            # 卸货保持 50 秒
+                        self.unload_end_time = now_sec + 30.0            # 卸货保持 50 秒
                         self.unload_reset_end_time = self.unload_end_time + 2.0  # 再给 2 秒显式复位
                         self.drive_state = self.DS_PAUSED
                         self.waiting_for_task = False

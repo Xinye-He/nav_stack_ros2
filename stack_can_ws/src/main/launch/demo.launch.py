@@ -127,6 +127,11 @@ def generate_launch_description():
             name='rsview',
             output='screen',
             parameters=[params_file],
+            arguments=[
+                '-host', '192.168.1.102',
+                '-msop', '6699',
+                '-difop', '7788',
+            ],
             condition=IfCondition(enable_lidar_driver),
         ),
 

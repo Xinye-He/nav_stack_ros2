@@ -53,22 +53,6 @@ target_link_libraries(rsview
   ${PCAP_LIB}
 )
 
-# 可执行：圆捆草垛估计（bale_estimator，在 base_link 下做 TF 转换）
-add_executable(bale_estimator src/bale_estimator.cpp)
-ament_target_dependencies(bale_estimator
-  rclcpp
-  sensor_msgs
-  geometry_msgs
-  visualization_msgs
-  pcl_conversions
-  tf2
-  tf2_ros
-  tf2_sensor_msgs
-)
-target_link_libraries(bale_estimator
-  ${PCL_LIBRARIES}
-)
-
 add_executable(bale_detector src/bale_detector.cpp)
 ament_target_dependencies(bale_detector
   rclcpp
@@ -88,7 +72,6 @@ target_link_libraries(bale_detector
 # 安装
 install(TARGETS
   rsview
-  bale_estimator
   bale_detector
   DESTINATION lib/${PROJECT_NAME}
 )
