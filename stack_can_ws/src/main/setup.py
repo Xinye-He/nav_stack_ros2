@@ -33,6 +33,7 @@ setup(
             'websocket_teleop_key   = main.websocket_teleop_key:main',
             'bale_align_controller  = main.bale_align_controller:main',
             'geofence_monitor       = main.geofence_monitor:main',
+            'ultrasonic             = main.ultrasonic:main',
         ],
     },
 )

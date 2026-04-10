@@ -10,7 +10,7 @@ import select
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, UInt8
+from std_msgs.msg import Bool, UInt8, String
 from stack_msgs.msg import StackCommand
 import websockets
 
@@ -64,6 +64,9 @@ class WebSocketTeleopBridge(Node):
         self.pub_teleop_act = self.create_publisher(Bool, '/teleop_active', 1)
         self.pub_teleop_cmd = self.create_publisher(StackCommand, '/stack_cmd/teleop', 1)
         self.pub_reset_estop = self.create_publisher(Bool, '/reset_estop', 1)
+        self.pub_abort = self.create_publisher(Bool, '/abort', 1)
+        self.pub_link_ok = self.create_publisher(Bool, '/network_link_ok', 1)
+        self.pub_fault_text = self.create_publisher(String, '/network_fault_text', 10)
 
         # 内部状态
         self.drive_state = 1
@@ -77,6 +80,22 @@ class WebSocketTeleopBridge(Node):
         self.pick_action = False
 
         self.last_ts = {}
+
+        self.ws_connected = False
+        self.active_client_addr = None
+        self.last_rx_monotonic = 0.0
+
+        self.declare_parameter('link_timeout_sec', 1.5)
+        self.declare_parameter('abort_on_disconnect', True)
+
+        self.link_timeout_sec = float(self.get_parameter('link_timeout_sec').value)
+        self.abort_on_disconnect = bool(self.get_parameter('abort_on_disconnect').value)
+
+        self.network_fault_latched = False
+        self.last_link_ok_pub = None
+        self.last_fault_text = ''
+
+        self.create_timer(0.1, self.link_watchdog_loop)   # 10Hz
 
         # 本地终端相关
         self.fd = None
@@ -140,6 +159,75 @@ class WebSocketTeleopBridge(Node):
         self.dump = False
         self.pick_action = False
 
+    #发布链路状态
+    def publish_link_ok(self, ok: bool):
+        if self.last_link_ok_pub is ok:
+            return
+        self.pub_link_ok.publish(Bool(data=bool(ok)))
+        self.last_link_ok_pub = ok
+        self.get_logger().info(f'/network_link_ok -> {ok}')
+
+    #发布故障文本
+    def publish_fault_text(self, text: str):
+        if text == self.last_fault_text:
+            return
+        self.pub_fault_text.publish(String(data=text))
+        self.last_fault_text = text
+        self.get_logger().warn(text)
+    
+    #发布abort
+    def publish_abort(self):
+        self.pub_abort.publish(Bool(data=True))
+        self.get_logger().warn('/abort -> True')
+    
+    #统一的“网络故障触发abort”入口
+    def trigger_network_abort(self, reason: str):
+        # 已经锁存过一次，就不要反复刷屏
+        if self.network_fault_latched:
+            return
+
+        self.network_fault_latched = True
+
+        # 为了避免锁存瞬间仍残留旧 teleop 命令，先清零再 abort
+        self.zero_teleop()
+        self.publish_teleop_cmd()
+
+        self.publish_link_ok(False)
+        self.publish_fault_text(f'NETWORK FAULT: {reason}')
+        if self.abort_on_disconnect:
+            self.publish_abort()
+
+    #链路恢复入口 
+    def mark_link_restored(self, client_addr=None):
+        self.ws_connected = True
+        self.active_client_addr = client_addr
+        self.last_rx_monotonic = time.monotonic()
+        self.publish_link_ok(True)
+
+        # 注意：这里只报告恢复，不自动 clear abort
+        if self.network_fault_latched:
+            self.publish_fault_text(
+                'NETWORK RECOVERED: link restored, manual reset_estop required'
+            )
+        else:
+            self.publish_fault_text('NETWORK OK')
+
+    #看门狗链路
+    def link_watchdog_loop(self):
+        now = time.monotonic()
+
+        # 没客户端连接，且之前不是故障状态时，不一定要强制 abort；
+        # 但如果你希望“远程模式下必须有链路”，这里可以直接判故障。
+        if not self.ws_connected:
+            return
+
+        dt = now - self.last_rx_monotonic
+        if dt > self.link_timeout_sec:
+            self.ws_connected = False
+            self.trigger_network_abort(
+                f'websocket heartbeat timeout: no message for {dt:.2f}s'
+            )
+
     # ---------------- 发布函数 ----------------
     def publish_drive_cmd(self):
         msg = UInt8()
@@ -195,7 +283,8 @@ class WebSocketTeleopBridge(Node):
 
         self.drive_state = 1
         self.publish_drive_cmd()
-
+        
+        self.network_fault_latched = False
         self.publish_reset_estop()
 
     # ---------------- 按键语义 ----------------
@@ -315,12 +404,17 @@ class WebSocketTeleopBridge(Node):
     async def handle_client(self, websocket, path):
         client_addr = websocket.remote_address
         self.get_logger().info(f"Client connected from {client_addr}")
+
+        self.mark_link_restored(client_addr)
+
         try:
             async for message in websocket:
+                self.last_rx_monotonic = time.monotonic()
+
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
-                    self.get_logger().error("Received invalid JSON")
+                    self.get_logger().warn(f"Invalid JSON from {client_addr}: {message}")
                     continue
 
                 if 'key' in data:
@@ -391,9 +485,13 @@ class WebSocketTeleopBridge(Node):
                 self.get_logger().warn(f"Unknown message: {data}")
 
         except websockets.exceptions.ConnectionClosed:
-            self.get_logger().info(f"Client {client_addr} disconnected")
+            self.ws_connected = False
+            self.get_logger().warn(f"Client {client_addr} disconnected")
+            self.trigger_network_abort(f'websocket disconnected: {client_addr}')
         except Exception as e:
+            self.ws_connected = False
             self.get_logger().error(f"Unexpected error: {e}")
+            self.trigger_network_abort(f'websocket exception: {e}')
 
     # ---------------- 本地键盘监听 ----------------
     async def keyboard_loop(self):
