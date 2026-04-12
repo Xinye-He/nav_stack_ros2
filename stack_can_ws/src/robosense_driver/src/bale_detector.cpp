@@ -2,6 +2,11 @@
 #include <cmath>
 #include <limits>
 #include <vector>
+#include <array>
+#include <unordered_set>
+#include <sstream>
+#include <cstdint>
+#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -9,12 +14,9 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
-
-#include <pcl/filters/filter.h>                 // removeNaNFromPointCloud
+#include <pcl/filters/filter.h>
 #include <pcl/search/kdtree.h>
 #include <pcl/segmentation/extract_clusters.h>
-#include <pcl/segmentation/sac_segmentation.h>
-#include <pcl/filters/extract_indices.h>
 
 #include <Eigen/Dense>
 
@@ -32,195 +34,159 @@ public:
   BaleDetectorGround()
   : Node("bale_detector_ground")
   {
-    // 基本参数（可改成 declare_parameter 再从参数服务器读取）
-    min_range_ = 1.0f;   // 关注的水平距离范围
-    max_range_ = 10.0f;
+    // ===== 基本参数 =====
+    min_range_ = this->declare_parameter<float>("min_range_m", 1.0f);
+    max_range_ = this->declare_parameter<float>("max_range_m", 10.0f);
 
-    // 草捆尺寸（直径0.6m、长1.2m，对包围盒给宽松范围）
-    bale_min_long_ = 0.3f;   // XY平面包围盒较长边下限
-    bale_max_long_ = 2.0f;   // 较长边上限
-    bale_min_short_ = 0.1f;  // 较短边下限
-    bale_max_short_ = 2.0f;  // 较短边上限
+    // 固定外参：地面坐标系由安装参数直接给出
+    sensor_height_m_ = this->declare_parameter<float>("sensor_height_m", 1.85f);
+    mount_pitch_deg_ = this->declare_parameter<float>("mount_pitch_deg", -20.0f);
+    mount_roll_deg_  = this->declare_parameter<float>("mount_roll_deg", 0.0f);
 
-    cluster_tolerance_ = 0.3f;   // 聚类半径
-    cluster_min_size_ = 100;
-    cluster_max_size_ = 5000;
+    // 高度带筛选：保留离地 [min_height, max_height] 的点
+    min_height_m_ = this->declare_parameter<float>("min_height_m", 0.20f);
+    max_height_m_ = this->declare_parameter<float>("max_height_m", 1.00f);
 
-    ground_dist_thresh_ = 0.21f; // 地面RANSAC拟合距离阈值（m）
+    // 2D聚类参数（在 ground 平面的 XY 上）
+    cluster_tolerance_ = this->declare_parameter<float>("cluster_tolerance_m", 0.15f);
+    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 50);
+    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 2000);
+
+    // 草捆二维尺寸判据（地平面 PCA 包围盒）
+    bale_min_long_  = this->declare_parameter<float>("bale_min_long_m", 0.80f);
+    bale_max_long_  = this->declare_parameter<float>("bale_max_long_m", 2.20f);
+    bale_min_short_ = this->declare_parameter<float>("bale_min_short_m", 0.40f);
+    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 1.50f);
+
+    // 长宽比
+    aspect_min_ = this->declare_parameter<float>("aspect_min", 1.0f);
+    aspect_max_ = this->declare_parameter<float>("aspect_max", 4.0f);
+
+    // 候选在 z 方向的厚度
+    z_span_min_ = this->declare_parameter<float>("z_span_min_m", 0.40f);
+    z_span_max_ = this->declare_parameter<float>("z_span_max_m", 1.20f);
+
+    // 一个简单的二维占据率，用于剔除特别稀疏/细碎的簇
+    occupancy_grid_res_m_ = this->declare_parameter<float>("occupancy_grid_res_m", 0.08f);
+    fill_ratio_min_       = this->declare_parameter<float>("fill_ratio_min", 0.18f);
 
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_points",
       rclcpp::SensorDataQoS(),
       std::bind(&BaleDetectorGround::cloudCallback, this, std::placeholders::_1));
 
-    tf_broadcaster_ =
-      std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
       "bale_markers", 10);
 
-    // 新增：去地面点云
-    nonground_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "nonground_points", 10);
+    ground_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "ground_aligned_points", 10);
 
-    // 新增：聚类后着色点云
-    cluster_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "cluster_points", 10);
+    height_filtered_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "height_filtered_points", 10);
 
-    // 新增：最近草捆目标
+    projected_cluster_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "projected_cluster_points", 10);
+
     bale_target_pub_ = this->create_publisher<stack_msgs::msg::BaleTarget>(
       "bale_target", 10);
 
-    RCLCPP_INFO(this->get_logger(),
-                "BaleDetectorGround subscribed to /rslidar_points");
+    RCLCPP_INFO(
+      this->get_logger(),
+      "BaleDetectorGround started. fixed-ground mode enabled.");
   }
 
 private:
-  void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  struct GroundFrame
   {
-    if (msg->width * msg->height == 0) {
-      return;
-    }
+    Eigen::Vector3f x_g_in_lidar;
+    Eigen::Vector3f y_g_in_lidar;
+    Eigen::Vector3f z_g_in_lidar;
+    Eigen::Vector3f origin_in_lidar;   // ground原点在lidar坐标中的位置
+    Eigen::Matrix3f R_lg;              // 列向量是ground各轴在lidar中的表示
+    Eigen::Matrix3f R_gl;              // lidar -> ground 旋转
+  };
 
-    // 1. ROS2 -> PCL
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_in(new pcl::PointCloud<pcl::PointXYZI>);
-    pcl::fromROSMsg(*msg, *cloud_in);
+  struct Candidate2D
+  {
+    bool valid{false};
 
-    // 1.1 去掉 NaN 点
-    std::vector<int> indices;
-    pcl::removeNaNFromPointCloud(*cloud_in, *cloud_in, indices);
-    cloud_in->is_dense = true;
+    Eigen::Vector2f center_xy = Eigen::Vector2f::Zero();
+    float center_z = 0.0f;
 
-    if (cloud_in->empty()) {
-      publishEmptyMarkers(msg->header.stamp);
-      return;
-    }
+    Eigen::Vector2f e_major = Eigen::Vector2f::UnitX();
+    Eigen::Vector2f e_minor = Eigen::Vector2f::UnitY();
 
-    // 2. 前方 设定距离 的 ROI（在雷达坐标系 XY 平面上）
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_roi(new pcl::PointCloud<pcl::PointXYZI>);
-    cloud_roi->reserve(cloud_in->size());
+    float len_major = 0.0f;
+    float len_minor = 0.0f;
+    float z_min = 0.0f;
+    float z_max = 0.0f;
+    float z_span = 0.0f;
+    float fill_ratio = 0.0f;
 
-    for (const auto & p : cloud_in->points) {
-      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
-        continue;
-      }
+    std::array<Eigen::Vector2f, 4> corners;
+  };
 
-      // 假设 x>0 为前方
-      if (p.x <= 0.0f) continue;
+  static float deg2rad(float deg)
+  {
+    return deg * static_cast<float>(M_PI) / 180.0f;
+  }
 
-      float r_xy = std::sqrt(p.x * p.x + p.y * p.y);
-      if (r_xy < min_range_ || r_xy > max_range_) continue;
+  GroundFrame buildGroundFrame() const
+  {
+    GroundFrame gf;
 
-      cloud_roi->points.push_back(p);
-    }
-    cloud_roi->width = static_cast<uint32_t>(cloud_roi->points.size());
-    cloud_roi->height = 1;
-    cloud_roi->is_dense = true;
+    // 约定：
+    // ground: x前, y左, z上
+    // lidar : 默认也按 x前, y左, z上理解
+    //
+    // 这里把“ground轴在lidar中的表示”构造出来。
+    // 若发现 pitch 符号反了，只需把 launch/参数里的 mount_pitch_deg 改成相反数即可。
+    const float roll  = deg2rad(mount_roll_deg_);
+    const float pitch = deg2rad(mount_pitch_deg_);
 
-    if (cloud_roi->points.size() < static_cast<size_t>(cluster_min_size_)) {
-      publishEmptyMarkers(msg->header.stamp);
-      // 同时也清空聚类点云
-      publishEmptyPointClouds(msg->header.stamp);
-      publishEmptyTarget();
-      return;
-    }
+    Eigen::AngleAxisf Rx(roll,  Eigen::Vector3f::UnitX());
+    Eigen::AngleAxisf Ry(pitch, Eigen::Vector3f::UnitY());
 
-    // 3. 用 RANSAC 在 ROI 里拟合“地面平面”
-    pcl::SACSegmentation<pcl::PointXYZI> seg;
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setDistanceThreshold(ground_dist_thresh_);
-    seg.setMaxIterations(100);
-    seg.setInputCloud(cloud_roi);
+    // 这里使用 Ry * Rx，把 ground 坐标轴旋到 lidar 坐标中
+    Eigen::Matrix3f R_lg = (Ry * Rx).toRotationMatrix();
 
-    pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices);
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    gf.R_lg = R_lg;
+    gf.R_gl = R_lg.transpose();
 
-    seg.segment(*ground_inliers, *coefficients);
+    gf.x_g_in_lidar = gf.R_lg.col(0);
+    gf.y_g_in_lidar = gf.R_lg.col(1);
+    gf.z_g_in_lidar = gf.R_lg.col(2);
 
-    if (ground_inliers->indices.empty() || coefficients->values.size() < 4) {
-      RCLCPP_WARN_THROTTLE(
-        this->get_logger(), *this->get_clock(), 2000,
-        "No ground plane found, skip this frame.");
-      publishEmptyMarkers(msg->header.stamp);
-      publishEmptyPointClouds(msg->header.stamp);
-      publishEmptyTarget();
-      return;
-    }
+    // ground原点设为“雷达在地面上的垂足”
+    // ground z轴向上，则在 lidar 坐标里，地面原点位于雷达沿 -z_g 方向 sensor_height_m_ 处
+    gf.origin_in_lidar = -sensor_height_m_ * gf.z_g_in_lidar;
 
-    // 平面方程: a x + b y + c z + d = 0
-    float a = coefficients->values[0];
-    float b = coefficients->values[1];
-    float c = coefficients->values[2];
-    float d = coefficients->values[3];
+    return gf;
+  }
 
-    Eigen::Vector3f n_raw(a, b, c);
-    float n_norm = n_raw.norm();
-    if (n_norm < 1e-6f) {
-      publishEmptyMarkers(msg->header.stamp);
-      publishEmptyPointClouds(msg->header.stamp);
-      return;
-    }
+  Eigen::Vector3f pointLidarToGround(const Eigen::Vector3f & p_l, const GroundFrame & gf) const
+  {
+    return gf.R_gl * (p_l - gf.origin_in_lidar);
+  }
 
-    Eigen::Vector3f n = n_raw / n_norm;  // 单位法向
-    float d_norm = d / n_norm;
-
-    // 用地面内点的质心，调整法向方向：保证法向从地面指向雷达
-    Eigen::Vector3f centroid(0.0f, 0.0f, 0.0f);
-    for (int idx : ground_inliers->indices) {
-      const auto & p = cloud_roi->points[idx];
-      centroid += Eigen::Vector3f(p.x, p.y, p.z);
-    }
-    centroid /= static_cast<float>(ground_inliers->indices.size());
-
-    Eigen::Vector3f v_plane_to_sensor = -centroid;  // 质心->传感器(0,0,0)
-    if (n.dot(v_plane_to_sensor) < 0.0f) {
-      // 法向朝“地下”，翻转
-      n = -n;
-      d_norm = -d_norm;
-    }
-
-    // 这里 n 就是“向上”的地面法向，d_norm 为平面到原点的有符号距离
-
-    // 3.1 构造“水平地面坐标系 ground”在 rslidar 坐标系下的基
-    Eigen::Vector3f z_g = n;  // 向上
-
-    // x_g: 雷达x轴在地面平面的投影（前方）
-    Eigen::Vector3f ex(1.0f, 0.0f, 0.0f);
-    Eigen::Vector3f x_g = ex - ex.dot(z_g) * z_g;
-    if (x_g.norm() < 1e-3f) {
-      // 退化情况（极不可能），用 y 轴投影
-      ex = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
-      x_g = ex - ex.dot(z_g) * z_g;
-    }
-    x_g.normalize();
-
-    // y_g: 右手系，前+x，左+y，上+z
-    Eigen::Vector3f y_g = z_g.cross(x_g);
-    y_g.normalize();
-
-    // 3.2 地平面上选择一个原点：传感器在地面上的垂足
-    // 实际地面平面: n·p + d_norm = 0
-    // 原点(0,0,0)在rslidar，垂足 p0 = -d_norm * n
-    Eigen::Vector3f p0 = -d_norm * n;
-
-    // 3.3 发布 TF: rslidar -> ground
+  void publishGroundTF(const GroundFrame & gf, const rclcpp::Time & stamp)
+  {
     geometry_msgs::msg::TransformStamped tf_msg;
-    tf_msg.header.stamp = msg->header.stamp;
-    tf_msg.header.frame_id = "rslidar";   // 父坐标系
-    tf_msg.child_frame_id  = "ground";    // 子坐标系
+    tf_msg.header.stamp = stamp;
+    tf_msg.header.frame_id = "rslidar";
+    tf_msg.child_frame_id = "ground";
 
-    tf_msg.transform.translation.x = p0.x();
-    tf_msg.transform.translation.y = p0.y();
-    tf_msg.transform.translation.z = p0.z();
+    tf_msg.transform.translation.x = gf.origin_in_lidar.x();
+    tf_msg.transform.translation.y = gf.origin_in_lidar.y();
+    tf_msg.transform.translation.z = gf.origin_in_lidar.z();
 
-    // 旋转矩阵（列为子坐标轴在父坐标系中的坐标）
     tf2::Matrix3x3 rot(
-      x_g.x(), y_g.x(), z_g.x(),
-      x_g.y(), y_g.y(), z_g.y(),
-      x_g.z(), y_g.z(), z_g.z()
-    );
+      gf.x_g_in_lidar.x(), gf.y_g_in_lidar.x(), gf.z_g_in_lidar.x(),
+      gf.x_g_in_lidar.y(), gf.y_g_in_lidar.y(), gf.z_g_in_lidar.y(),
+      gf.x_g_in_lidar.z(), gf.y_g_in_lidar.z(), gf.z_g_in_lidar.z());
+
     tf2::Quaternion q;
     rot.getRotation(q);
     tf_msg.transform.rotation.x = q.x();
@@ -229,42 +195,350 @@ private:
     tf_msg.transform.rotation.w = q.w();
 
     tf_broadcaster_->sendTransform(tf_msg);
+  }
 
-    // 4. 去掉地面点，得到非地面点云
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_nonground(new pcl::PointCloud<pcl::PointXYZI>);
-    {
-      pcl::ExtractIndices<pcl::PointXYZI> extract;
-      extract.setInputCloud(cloud_roi);
-      extract.setIndices(ground_inliers);
-      extract.setNegative(true);  // 提取非地面
-      extract.filter(*cloud_nonground);
+  static void computeMeanCov2D(
+    const std::vector<Eigen::Vector2f> & pts,
+    Eigen::Vector2f & mean,
+    Eigen::Matrix2f & cov)
+  {
+    mean.setZero();
+    cov.setZero();
+
+    if (pts.empty()) {
+      return;
     }
 
-    if (cloud_nonground->empty()) {
+    for (const auto & p : pts) {
+      mean += p;
+    }
+    mean /= static_cast<float>(pts.size());
+
+    for (const auto & p : pts) {
+      Eigen::Vector2f d = p - mean;
+      cov += d * d.transpose();
+    }
+    cov /= std::max(1.0f, static_cast<float>(pts.size() - 1));
+  }
+
+  float estimateFillRatio(
+    const std::vector<Eigen::Vector2f> & local_pts,
+    float major_min, float major_max,
+    float minor_min, float minor_max) const
+  {
+    if (local_pts.empty()) {
+      return 0.0f;
+    }
+
+    const float box_w = std::max(major_max - major_min, 1e-3f);
+    const float box_h = std::max(minor_max - minor_min, 1e-3f);
+    const float box_area = box_w * box_h;
+
+    if (box_area < 1e-6f) {
+      return 0.0f;
+    }
+
+    const float res = std::max(occupancy_grid_res_m_, 0.02f);
+    std::unordered_set<std::uint64_t> occupied;
+    occupied.reserve(local_pts.size());
+
+    for (const auto & p : local_pts) {
+      int ix = static_cast<int>(std::floor((p.x() - major_min) / res));
+      int iy = static_cast<int>(std::floor((p.y() - minor_min) / res));
+      std::uint64_t key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ix)) << 32) ^
+        static_cast<std::uint32_t>(iy);
+      occupied.insert(key);
+    }
+
+    const float occ_area = static_cast<float>(occupied.size()) * res * res;
+    return occ_area / box_area;
+  }
+
+  Candidate2D analyzeCluster2D(
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr & cloud_height_filtered,
+    const pcl::PointIndices & cluster_idx) const
+  {
+    Candidate2D out;
+    if (cluster_idx.indices.empty()) {
+      return out;
+    }
+
+    std::vector<Eigen::Vector2f> pts2;
+    pts2.reserve(cluster_idx.indices.size());
+
+    float sum_z = 0.0f;
+    float z_min = std::numeric_limits<float>::max();
+    float z_max = std::numeric_limits<float>::lowest();
+
+    for (int idx : cluster_idx.indices) {
+      const auto & p = cloud_height_filtered->points[idx];
+      pts2.emplace_back(p.x, p.y);
+      sum_z += p.z;
+      z_min = std::min(z_min, p.z);
+      z_max = std::max(z_max, p.z);
+    }
+
+    if (pts2.size() < 3) {
+      return out;
+    }
+
+    Eigen::Vector2f mean;
+    Eigen::Matrix2f cov;
+    computeMeanCov2D(pts2, mean, cov);
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(cov);
+    if (es.info() != Eigen::Success) {
+      return out;
+    }
+
+    Eigen::Vector2f e_minor = es.eigenvectors().col(0).normalized();
+    Eigen::Vector2f e_major = es.eigenvectors().col(1).normalized();
+
+    if (e_major.x() < 0.0f) {
+      e_major = -e_major;
+    }
+    e_minor = Eigen::Vector2f(-e_major.y(), e_major.x());
+
+    float major_min = std::numeric_limits<float>::max();
+    float major_max = std::numeric_limits<float>::lowest();
+    float minor_min = std::numeric_limits<float>::max();
+    float minor_max = std::numeric_limits<float>::lowest();
+
+    std::vector<Eigen::Vector2f> local_pts;
+    local_pts.reserve(pts2.size());
+
+    for (const auto & p : pts2) {
+      Eigen::Vector2f d = p - mean;
+      float u = d.dot(e_major);
+      float v = d.dot(e_minor);
+
+      local_pts.emplace_back(u, v);
+
+      major_min = std::min(major_min, u);
+      major_max = std::max(major_max, u);
+      minor_min = std::min(minor_min, v);
+      minor_max = std::max(minor_max, v);
+    }
+
+    const float len_major = major_max - major_min;
+    const float len_minor = minor_max - minor_min;
+    const float aspect = len_major / std::max(len_minor, 1e-3f);
+    const float z_span = z_max - z_min;
+    const float fill_ratio = estimateFillRatio(local_pts, major_min, major_max, minor_min, minor_max);
+
+    if (len_major < bale_min_long_ || len_major > bale_max_long_) {
+      return out;
+    }
+    if (len_minor < bale_min_short_ || len_minor > bale_max_short_) {
+      return out;
+    }
+    if (aspect < aspect_min_ || aspect > aspect_max_) {
+      return out;
+    }
+    if (z_span < z_span_min_ || z_span > z_span_max_) {
+      return out;
+    }
+    if (fill_ratio < fill_ratio_min_) {
+      return out;
+    }
+
+    Eigen::Vector2f c1 = mean + e_major * major_min + e_minor * minor_min;
+    Eigen::Vector2f c2 = mean + e_major * major_max + e_minor * minor_min;
+    Eigen::Vector2f c3 = mean + e_major * major_max + e_minor * minor_max;
+    Eigen::Vector2f c4 = mean + e_major * major_min + e_minor * minor_max;
+
+    out.valid = true;
+    out.center_xy = mean;
+    out.center_z = sum_z / static_cast<float>(pts2.size());
+    out.e_major = e_major;
+    out.e_minor = e_minor;
+    out.len_major = len_major;
+    out.len_minor = len_minor;
+    out.z_min = z_min;
+    out.z_max = z_max;
+    out.z_span = z_span;
+    out.fill_ratio = fill_ratio;
+    out.corners = {c1, c2, c3, c4};
+
+    return out;
+  }
+
+  void add2DBoxMarker(
+    visualization_msgs::msg::MarkerArray & arr,
+    const Candidate2D & c,
+    int & marker_id,
+    const rclcpp::Time & stamp,
+    bool is_best) const
+  {
+    visualization_msgs::msg::Marker box;
+    box.header.stamp = stamp;
+    box.header.frame_id = "ground";
+    box.ns = "bale_2d_boxes";
+    box.id = marker_id++;
+    box.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    box.action = visualization_msgs::msg::Marker::ADD;
+    box.pose.orientation.w = 1.0;
+    box.scale.x = is_best ? 0.06 : 0.03;
+    box.color.r = is_best ? 1.0f : 0.1f;
+    box.color.g = is_best ? 0.2f : 1.0f;
+    box.color.b = is_best ? 0.1f : 0.1f;
+    box.color.a = 0.95f;
+    box.lifetime = rclcpp::Duration(0, 300000000);
+
+    const float z_draw = 0.05f;
+
+    auto push_pt = [&](const Eigen::Vector2f & p) {
+      geometry_msgs::msg::Point gp;
+      gp.x = p.x();
+      gp.y = p.y();
+      gp.z = z_draw;
+      box.points.push_back(gp);
+    };
+
+    push_pt(c.corners[0]);
+    push_pt(c.corners[1]);
+    push_pt(c.corners[2]);
+    push_pt(c.corners[3]);
+    push_pt(c.corners[0]);
+
+    arr.markers.push_back(box);
+
+    visualization_msgs::msg::Marker center;
+    center.header = box.header;
+    center.ns = "bale_2d_centers";
+    center.id = marker_id++;
+    center.type = visualization_msgs::msg::Marker::SPHERE;
+    center.action = visualization_msgs::msg::Marker::ADD;
+    center.pose.position.x = c.center_xy.x();
+    center.pose.position.y = c.center_xy.y();
+    center.pose.position.z = z_draw + 0.03f;
+    center.pose.orientation.w = 1.0;
+    center.scale.x = 0.10;
+    center.scale.y = 0.10;
+    center.scale.z = 0.10;
+    center.color.r = is_best ? 1.0f : 0.9f;
+    center.color.g = is_best ? 0.2f : 0.9f;
+    center.color.b = 0.0f;
+    center.color.a = 0.9f;
+    center.lifetime = rclcpp::Duration(0, 300000000);
+    arr.markers.push_back(center);
+  }
+
+  void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  {
+    if (msg->width * msg->height == 0) {
+      return;
+    }
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_in(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::fromROSMsg(*msg, *cloud_in);
+
+    std::vector<int> nan_indices;
+    pcl::removeNaNFromPointCloud(*cloud_in, *cloud_in, nan_indices);
+    cloud_in->is_dense = true;
+
+    if (cloud_in->empty()) {
+      publishEmptyAll(msg->header.stamp);
+      return;
+    }
+
+    const GroundFrame gf = buildGroundFrame();
+    publishGroundTF(gf, msg->header.stamp);
+
+    // 1) 先做前向 ROI，然后整体转到 ground
+    pcl::PointCloud<pcl::PointXYZI>::Ptr ground_cloud(new pcl::PointCloud<pcl::PointXYZI>);
+    ground_cloud->reserve(cloud_in->size());
+
+    for (const auto & p : cloud_in->points) {
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+        continue;
+      }
+
+      // 先用 lidar 原坐标的前方范围做一次粗筛，减少计算量
+      if (p.x <= 0.0f) {
+        continue;
+      }
+
+      const float r_xy_lidar = std::sqrt(p.x * p.x + p.y * p.y);
+      if (r_xy_lidar < min_range_ || r_xy_lidar > max_range_) {
+        continue;
+      }
+
+      Eigen::Vector3f p_l(p.x, p.y, p.z);
+      Eigen::Vector3f p_g = pointLidarToGround(p_l, gf);
+
+      pcl::PointXYZI q;
+      q.x = p_g.x();
+      q.y = p_g.y();
+      q.z = p_g.z();
+      q.intensity = p.intensity;
+      ground_cloud->points.push_back(q);
+    }
+
+    ground_cloud->width = static_cast<std::uint32_t>(ground_cloud->points.size());
+    ground_cloud->height = 1;
+    ground_cloud->is_dense = true;
+
+    publishPointCloud<pcl::PointXYZI>(
+      ground_cloud_pub_, ground_cloud, rclcpp::Time(msg->header.stamp), "ground");
+
+    if (ground_cloud->points.size() < static_cast<size_t>(cluster_min_size_)) {
       publishEmptyMarkers(msg->header.stamp);
-      publishEmptyPointClouds(msg->header.stamp);
+      publishEmptyProjectedClusterCloud(msg->header.stamp);
+      publishEmptyHeightFilteredCloud(msg->header.stamp);
       publishEmptyTarget();
       return;
     }
 
-    // 4.1 发布去地面点云（供RViz中单独查看）
-    {
-      sensor_msgs::msg::PointCloud2 nonground_msg;
-      pcl::toROSMsg(*cloud_nonground, nonground_msg);
-      nonground_msg.header = msg->header;       // 使用原来的时间戳和 frame_id=rslidar
-      nonground_pub_->publish(nonground_msg);
+    // 2) 按离地高度筛选
+    pcl::PointCloud<pcl::PointXYZI>::Ptr height_filtered(new pcl::PointCloud<pcl::PointXYZI>);
+    height_filtered->reserve(ground_cloud->size());
+
+    for (const auto & p : ground_cloud->points) {
+      const float r_xy_ground = std::sqrt(p.x * p.x + p.y * p.y);
+      if (r_xy_ground < min_range_ || r_xy_ground > max_range_) {
+        continue;
+      }
+
+      if (p.z >= min_height_m_ && p.z <= max_height_m_) {
+        height_filtered->points.push_back(p);
+      }
     }
 
-    if (cloud_nonground->points.size() < static_cast<size_t>(cluster_min_size_)) {
+    height_filtered->width = static_cast<std::uint32_t>(height_filtered->points.size());
+    height_filtered->height = 1;
+    height_filtered->is_dense = true;
+
+    publishPointCloud<pcl::PointXYZI>(
+      height_filtered_pub_, height_filtered, rclcpp::Time(msg->header.stamp), "ground");
+
+    if (height_filtered->points.size() < static_cast<size_t>(cluster_min_size_)) {
       publishEmptyMarkers(msg->header.stamp);
-      // 聚类点云暂时发空
-      publishEmptyClusterCloud(msg->header.stamp);
+      publishEmptyProjectedClusterCloud(msg->header.stamp);
+      publishEmptyTarget();
       return;
     }
 
-    // 5. 欧式聚类
+    // 3) 2D聚类：直接把点投影到地面，只在 ground XY 上聚类
+    pcl::PointCloud<pcl::PointXYZI>::Ptr projected_for_cluster(new pcl::PointCloud<pcl::PointXYZI>);
+    projected_for_cluster->reserve(height_filtered->size());
+
+    for (const auto & p : height_filtered->points) {
+      pcl::PointXYZI q;
+      q.x = p.x;
+      q.y = p.y;
+      q.z = 0.0f;
+      q.intensity = p.intensity;
+      projected_for_cluster->points.push_back(q);
+    }
+
+    projected_for_cluster->width = static_cast<std::uint32_t>(projected_for_cluster->points.size());
+    projected_for_cluster->height = 1;
+    projected_for_cluster->is_dense = true;
+
     pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>);
-    tree->setInputCloud(cloud_nonground);
+    tree->setInputCloud(projected_for_cluster);
 
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZI> ec;
@@ -272,22 +546,19 @@ private:
     ec.setMinClusterSize(cluster_min_size_);
     ec.setMaxClusterSize(cluster_max_size_);
     ec.setSearchMethod(tree);
-    ec.setInputCloud(cloud_nonground);
+    ec.setInputCloud(projected_for_cluster);
     ec.extract(cluster_indices);
 
-    // 为可视化聚类效果，构造一个带颜色的点云
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cluster_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
-    cluster_cloud->reserve(cloud_nonground->points.size());
+    // 彩色投影点云，方便看每个候选簇
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr projected_cluster_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+    projected_cluster_cloud->reserve(projected_for_cluster->size());
 
-    // MarkerArray：本帧所有草捆候选的可视化
     visualization_msgs::msg::MarkerArray marker_array;
-
-    // 第一个 Marker: DELETEALL，清空旧的
     {
       visualization_msgs::msg::Marker clear_marker;
       clear_marker.header.stamp = msg->header.stamp;
-      clear_marker.header.frame_id = "rslidar";
-      clear_marker.ns = "bale_candidates";
+      clear_marker.header.frame_id = "ground";
+      clear_marker.ns = "bale_2d_boxes";
       clear_marker.id = 0;
       clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
       marker_array.markers.push_back(clear_marker);
@@ -295,282 +566,235 @@ private:
 
     if (cluster_indices.empty()) {
       marker_pub_->publish(marker_array);
-      publishEmptyClusterCloud(msg->header.stamp);
+      publishEmptyProjectedClusterCloud(msg->header.stamp);
       publishEmptyTarget();
       return;
     }
 
-    // 6. 遍历所有cluster，筛选“草捆候选”，再用物理水平距离/角度选最近的
-    bool found_candidate = false;
-    float best_R = std::numeric_limits<float>::max();
-    float best_angle_user = 0.0f;
-    Eigen::Vector3f best_centroid_L(0.0f, 0.0f, 0.0f);
-
+    bool found_any = false;
     int marker_id = 1;
     int cluster_id = 0;
 
-    for (const auto & indices_cluster : cluster_indices) {
-      if (indices_cluster.indices.empty()) {
-        cluster_id++;
+    float best_R = std::numeric_limits<float>::max();
+    float best_angle_user = 0.0f;
+    Candidate2D best_candidate;
+
+    std::vector<Candidate2D> valid_candidates;
+    valid_candidates.reserve(cluster_indices.size());
+
+    for (const auto & cluster : cluster_indices) {
+      if (cluster.indices.empty()) {
+        ++cluster_id;
         continue;
       }
 
-      // 为该cluster生成一个颜色（简单hash）
-      uint8_t r = static_cast<uint8_t>((cluster_id * 53) % 256);
-      uint8_t g = static_cast<uint8_t>((cluster_id * 97) % 256);
-      uint8_t b = static_cast<uint8_t>((cluster_id * 151) % 256);
-      cluster_id++;
+      const uint8_t r = static_cast<uint8_t>((cluster_id * 53) % 256);
+      const uint8_t g = static_cast<uint8_t>((cluster_id * 97) % 256);
+      const uint8_t b = static_cast<uint8_t>((cluster_id * 151) % 256);
 
-      // 6.1 计算 聚类质心 + 包围盒（在 rslidar 坐标系）
-      float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
-      float min_x = std::numeric_limits<float>::max();
-      float max_x = std::numeric_limits<float>::lowest();
-      float min_y = std::numeric_limits<float>::max();
-      float max_y = std::numeric_limits<float>::lowest();
-      float min_z = std::numeric_limits<float>::max();
-      float max_z = std::numeric_limits<float>::lowest();
-
-      // 同时构造带颜色的聚类点云
-      for (int idx : indices_cluster.indices) {
-        const auto & p = cloud_nonground->points[idx];
-
-        sum_x += p.x;
-        sum_y += p.y;
-        sum_z += p.z;
-
-        if (p.x < min_x) min_x = p.x;
-        if (p.x > max_x) max_x = p.x;
-        if (p.y < min_y) min_y = p.y;
-        if (p.y > max_y) max_y = p.y;
-        if (p.z < min_z) min_z = p.z;
-        if (p.z > max_z) max_z = p.z;
-
+      for (int idx : cluster.indices) {
+        const auto & p = projected_for_cluster->points[idx];
         pcl::PointXYZRGB pc;
         pc.x = p.x;
         pc.y = p.y;
-        pc.z = p.z;
+        pc.z = 0.02f;
         pc.r = r;
         pc.g = g;
         pc.b = b;
-        cluster_cloud->points.push_back(pc);
+        projected_cluster_cloud->points.push_back(pc);
       }
 
-      const size_t N = indices_cluster.indices.size();
-      float cx = sum_x / static_cast<float>(N);
-      float cy = sum_y / static_cast<float>(N);
-      float cz = sum_z / static_cast<float>(N);
-      Eigen::Vector3f c_L(cx, cy, cz);
+      Candidate2D c = analyzeCluster2D(height_filtered, cluster);
+      ++cluster_id;
 
-      float dx = max_x - min_x;
-      float dy = max_y - min_y;
-      float dz = max_z - min_z;
+      if (!c.valid) {
+        continue;
+      }
 
-      // 6.2 XY平面包围盒长短边（只用于粗略尺寸过滤）
-      float d_long = std::max(dx, dy);
-      float d_short = std::min(dx, dy);
+      const float R = std::sqrt(c.center_xy.x() * c.center_xy.x() +
+                                c.center_xy.y() * c.center_xy.y());
+      if (R < min_range_ || R > max_range_) {
+        continue;
+      }
 
-      // 草捆尺寸初筛
-      if (d_long < bale_min_long_ || d_long > bale_max_long_) continue;
-      if (d_short < bale_min_short_ || d_short > bale_max_short_) continue;
-      if (dz < 0.53f || dz > 0.8f) continue;  // 高度粗过滤
+      // ROS通常左正右负；你现在沿用原项目“左负右正”
+      const float yaw_ros = std::atan2(c.center_xy.y(), c.center_xy.x());
+      const float angle_user = -yaw_ros;
 
-      // 6.3 在“物理水平地面”坐标系下计算水平距离 + 角度
-      // 去掉沿地面法向的分量：投影到通过传感器的、与地面平行的平面上
-      float h = c_L.dot(z_g);                 // 高度分量
-      Eigen::Vector3f v_h = c_L - h * z_g;    // 水平向量（在rslidar坐标中）
-
-      // 在 ground 坐标中的分量
-      float x_g_coord = v_h.dot(x_g);   // 前方 >0
-      float y_g_coord = v_h.dot(y_g);   // 左 >0，右 <0（ROS惯例）
-
-      float R = std::sqrt(x_g_coord * x_g_coord + y_g_coord * y_g_coord);
-
-      // 物理水平距离范围过滤一次
-      if (R < min_range_ || R > max_range_) continue;
-
-      // ROS 惯例下的方位角：左正右负
-      float yaw_ros = std::atan2(y_g_coord, x_g_coord);
-      // 你的约定：左负右正 → 取负号
-      float angle_user = -yaw_ros;
-
-      // 更新最近目标
       if (R < best_R) {
         best_R = R;
         best_angle_user = angle_user;
-        best_centroid_L = c_L;
-        found_candidate = true;
+        best_candidate = c;
       }
 
-      // === 生成该草捆候选的可视化 Marker（CUBE 包围盒） ===
-      visualization_msgs::msg::Marker m;
-      m.header.stamp = msg->header.stamp;
-      m.header.frame_id = "rslidar";     // RViz 会用 TF 转到 ground
-      m.ns = "bale_candidates";
-      m.id = marker_id++;
-      m.type = visualization_msgs::msg::Marker::CUBE;
-      m.action = visualization_msgs::msg::Marker::ADD;
-
-      // 包围盒中心用质心
-      m.pose.position.x = cx;
-      m.pose.position.y = cy;
-      m.pose.position.z = cz;
-      m.pose.orientation.x = 0.0;
-      m.pose.orientation.y = 0.0;
-      m.pose.orientation.z = 0.0;
-      m.pose.orientation.w = 1.0;
-
-      // 包围盒尺寸
-      m.scale.x = dx;
-      m.scale.y = dy;
-      m.scale.z = dz;
-
-      // 颜色：绿色半透明表示草捆候选
-      m.color.r = 0.0f;
-      m.color.g = 1.0f;
-      m.color.b = 0.0f;
-      m.color.a = 0.5f;
-
-      m.lifetime = rclcpp::Duration(0, 500000000); // 0.5s
-
-      marker_array.markers.push_back(m);
-
-      // （可选）再加一个小球表示质心
-      visualization_msgs::msg::Marker center;
-      center.header = m.header;
-      center.ns = "bale_centers";
-      center.id = marker_id++;
-      center.type = visualization_msgs::msg::Marker::SPHERE;
-      center.action = visualization_msgs::msg::Marker::ADD;
-      center.pose.position.x = cx;
-      center.pose.position.y = cy;
-      center.pose.position.z = cz;
-      center.pose.orientation.w = 1.0;
-      center.scale.x = 0.1;
-      center.scale.y = 0.1;
-      center.scale.z = 0.1;
-      center.color.r = 1.0f;
-      center.color.g = 0.0f;
-      center.color.b = 0.0f;
-      center.color.a = 0.8f;
-      center.lifetime = rclcpp::Duration(0, 500000000);
-
-      marker_array.markers.push_back(center);
+      valid_candidates.push_back(c);
+      found_any = true;
     }
 
-    // 完成聚类着色点云
-    cluster_cloud->width = static_cast<uint32_t>(cluster_cloud->points.size());
-    cluster_cloud->height = 1;
-    cluster_cloud->is_dense = true;
+    projected_cluster_cloud->width = static_cast<std::uint32_t>(projected_cluster_cloud->points.size());
+    projected_cluster_cloud->height = 1;
+    projected_cluster_cloud->is_dense = true;
 
-    // 发布可视化 Marker
+    publishPointCloud<pcl::PointXYZRGB>(
+      projected_cluster_pub_, projected_cluster_cloud, rclcpp::Time(msg->header.stamp), "ground");
+
+    if (!found_any) {
+      marker_pub_->publish(marker_array);
+      publishEmptyTarget();
+      return;
+    }
+
+    // 先画所有候选，再高亮最近那个
+    for (const auto & c : valid_candidates) {
+      const bool is_best =
+        (std::abs(c.center_xy.x() - best_candidate.center_xy.x()) < 1e-4f) &&
+        (std::abs(c.center_xy.y() - best_candidate.center_xy.y()) < 1e-4f);
+      add2DBoxMarker(marker_array, c, marker_id, msg->header.stamp, is_best);
+    }
+
     marker_pub_->publish(marker_array);
 
-    // 发布聚类着色点云
-    {
-      sensor_msgs::msg::PointCloud2 cluster_msg;
-      pcl::toROSMsg(*cluster_cloud, cluster_msg);
-      cluster_msg.header = msg->header;   // frame_id=rslidar
-      cluster_cloud_pub_->publish(cluster_msg);
-    }
+    stack_msgs::msg::BaleTarget tgt;
+    tgt.distance_m = best_R;
+    tgt.angle_deg  = best_angle_user * 180.0f / static_cast<float>(M_PI);
+    tgt.valid      = true;
+    bale_target_pub_->publish(tgt);
 
-    // 7. 打印最近草捆候选的距离和角度
-    if (found_candidate) {
-      float angle_deg = best_angle_user * 180.0f / static_cast<float>(M_PI);
-
-      // 发布到 /bale_target
-      if (bale_target_pub_) {
-        stack_msgs::msg::BaleTarget tgt;
-        tgt.distance_m = best_R;
-        tgt.angle_deg  = angle_deg;   // 注意：左负右正，与你栈内 angle_deg 约定一致
-        tgt.valid      = true;
-        bale_target_pub_->publish(tgt);
-      }
-
-      RCLCPP_INFO_THROTTLE(
-        this->get_logger(), *this->get_clock(), 500,
-        "Nearest bale (ground frame): R=%.2f m, angle_user=%.1f deg (left-, right+), "
-        "centroid_L=(%.2f, %.2f, %.2f)",
-        best_R, angle_deg,
-        best_centroid_L.x(), best_centroid_L.y(), best_centroid_L.z());
-    } else {
-      // 虽然上面各处 early-return 已经发过 invalid，这里兜底一次也可以
-      publishEmptyTarget();
-    }
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *this->get_clock(), 500,
+      "Nearest bale: R=%.2f m, angle=%.1f deg, center=(%.2f, %.2f), "
+      "size=(%.2f, %.2f), z_span=%.2f, fill=%.2f",
+      best_R,
+      tgt.angle_deg,
+      best_candidate.center_xy.x(),
+      best_candidate.center_xy.y(),
+      best_candidate.len_major,
+      best_candidate.len_minor,
+      best_candidate.z_span,
+      best_candidate.fill_ratio);
   }
 
-  // 发布一个只带 DELETEALL 的 MarkerArray，用于清空 RViz 中旧的草捆显示
+  template<typename PointT>
+  void publishPointCloud(
+    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & pub,
+    const typename pcl::PointCloud<PointT>::Ptr & cloud,
+    const rclcpp::Time & stamp,
+    const std::string & frame_id)
+  {
+    if (!pub) {
+      return;
+    }
+
+    sensor_msgs::msg::PointCloud2 out;
+    pcl::toROSMsg(*cloud, out);
+    out.header.stamp = stamp;
+    out.header.frame_id = frame_id;
+    pub->publish(out);
+  }
+
+  void publishEmptyCloud(
+    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & pub,
+    const rclcpp::Time & stamp,
+    const std::string & frame_id)
+  {
+    if (!pub) {
+      return;
+    }
+    sensor_msgs::msg::PointCloud2 msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = frame_id;
+    msg.height = 1;
+    msg.width = 0;
+    msg.is_dense = true;
+    pub->publish(msg);
+  }
+
   void publishEmptyMarkers(const rclcpp::Time & stamp)
   {
-    if (!marker_pub_) return;
+    if (!marker_pub_) {
+      return;
+    }
+
     visualization_msgs::msg::MarkerArray arr;
     visualization_msgs::msg::Marker clear_marker;
     clear_marker.header.stamp = stamp;
-    clear_marker.header.frame_id = "rslidar";
-    clear_marker.ns = "bale_candidates";
+    clear_marker.header.frame_id = "ground";
+    clear_marker.ns = "bale_2d_boxes";
     clear_marker.id = 0;
     clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
     arr.markers.push_back(clear_marker);
+
     marker_pub_->publish(arr);
   }
 
-  // 清空点云可视化（非必须，这里只是发布一个空消息）
-  void publishEmptyPointClouds(const rclcpp::Time & stamp)
+  void publishEmptyHeightFilteredCloud(const rclcpp::Time & stamp)
   {
-    publishEmptyCloudOnPub(nonground_pub_, stamp);
-    publishEmptyCloudOnPub(cluster_cloud_pub_, stamp);
+    publishEmptyCloud(height_filtered_pub_, stamp, "ground");
   }
 
-  void publishEmptyClusterCloud(const rclcpp::Time & stamp)
+  void publishEmptyProjectedClusterCloud(const rclcpp::Time & stamp)
   {
-    publishEmptyCloudOnPub(cluster_cloud_pub_, stamp);
-  }
-
-  void publishEmptyCloudOnPub(
-      const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr & pub,
-      const rclcpp::Time & stamp)
-  {
-    if (!pub) return;
-    sensor_msgs::msg::PointCloud2 empty_msg;
-    empty_msg.header.stamp = stamp;
-    empty_msg.header.frame_id = "rslidar";
-    empty_msg.height = 1;
-    empty_msg.width = 0;
-    empty_msg.is_dense = true;
-    pub->publish(empty_msg);
+    publishEmptyCloud(projected_cluster_pub_, stamp, "ground");
   }
 
   void publishEmptyTarget()
   {
-    if (!bale_target_pub_) return;
-    stack_msgs::msg::BaleTarget msg;
-    msg.distance_m = 0.0f;
-    msg.angle_deg  = 0.0f;
-    msg.valid      = false;
-    bale_target_pub_->publish(msg);
+    if (!bale_target_pub_) {
+      return;
+    }
+    stack_msgs::msg::BaleTarget tgt;
+    tgt.distance_m = 0.0f;
+    tgt.angle_deg = 0.0f;
+    tgt.valid = false;
+    bale_target_pub_->publish(tgt);
   }
 
+  void publishEmptyAll(const rclcpp::Time & stamp)
+  {
+    publishEmptyMarkers(stamp);
+    publishEmptyCloud(ground_cloud_pub_, stamp, "ground");
+    publishEmptyCloud(height_filtered_pub_, stamp, "ground");
+    publishEmptyCloud(projected_cluster_pub_, stamp, "ground");
+    publishEmptyTarget();
+  }
+
+private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 
-  // 去地面点云 & 聚类点云发布 & 最近草捆目标
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr nonground_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cluster_cloud_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr ground_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr height_filtered_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr projected_cluster_pub_;
   rclcpp::Publisher<stack_msgs::msg::BaleTarget>::SharedPtr bale_target_pub_;
 
   float min_range_;
   float max_range_;
+
+  float sensor_height_m_;
+  float mount_pitch_deg_;
+  float mount_roll_deg_;
+
+  float min_height_m_;
+  float max_height_m_;
+
+  float cluster_tolerance_;
+  int cluster_min_size_;
+  int cluster_max_size_;
 
   float bale_min_long_;
   float bale_max_long_;
   float bale_min_short_;
   float bale_max_short_;
 
-  float cluster_tolerance_;
-  int cluster_min_size_;
-  int cluster_max_size_;
+  float aspect_min_;
+  float aspect_max_;
 
-  float ground_dist_thresh_;
+  float z_span_min_;
+  float z_span_max_;
+
+  float occupancy_grid_res_m_;
+  float fill_ratio_min_;
 };
 
 int main(int argc, char ** argv)
