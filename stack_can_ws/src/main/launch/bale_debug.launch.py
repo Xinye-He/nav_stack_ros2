@@ -11,7 +11,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'params_file',
-            default_value='/home/xinye30/stack_can_ws/src/main/config/params.yaml',
+            default_value='/root/stack_can_ws/src/main/config/params.yaml',
             description='Path to params.yaml'
         ),
 
@@ -84,39 +84,22 @@ def generate_launch_description():
         # 不走 traj，但让 bale_controller 认为自己处在“任务等待点”
         # -------------------------------------------------
 
-        # /drive_cmd = 1 (RUNNING)
         ExecuteProcess(
-            cmd=[
-                'bash', '-lc',
-                'source /opt/ros/humble/setup.bash && '
-                'source /home/xinye30/stack_can_ws/install/setup.bash && '
-                'ros2 topic pub -r 5 /drive_cmd std_msgs/msg/UInt8 "{data: 1}"'
-            ],
+            cmd=['ros2', 'topic', 'pub', '-r', '5',
+                 '/drive_cmd', 'std_msgs/msg/UInt8', '{data: 1}'],
             output='screen'
         ),
 
-        # /at_task_waiting = true
         ExecuteProcess(
-            cmd=[
-                'bash', '-lc',
-                'source /opt/ros/humble/setup.bash && '
-                'source /home/xinye30/stack_can_ws/install/setup.bash && '
-                'ros2 topic pub -r 5 /at_task_waiting std_msgs/msg/Bool "{data: true}"'
-            ],
+            cmd=['ros2', 'topic', 'pub', '-r', '5',
+                 '/at_task_waiting', 'std_msgs/msg/Bool', '{data: true}'],
             output='screen'
         ),
 
-        # /teleop_active = false
-        # 否则 executor 可能优先吃 teleop
         ExecuteProcess(
-            cmd=[
-                'bash', '-lc',
-                'source /opt/ros/humble/setup.bash && '
-                'source /home/xinye30/stack_can_ws/install/setup.bash && '
-                'ros2 topic pub -r 2 /teleop_active std_msgs/msg/Bool "{data: false}"'
-            ],
+            cmd=['ros2', 'topic', 'pub', '-r', '2',
+                 '/teleop_active', 'std_msgs/msg/Bool', '{data: false}'],
             output='screen'
         ),
 
-        # /bale_active 可由 controller 自己发，不需要这里额外发布
     ])

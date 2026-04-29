@@ -1,5 +1,7 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler, EmitEvent
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, EnvironmentVariable
 from launch_ros.actions import Node
@@ -16,6 +18,26 @@ def generate_launch_description():
     params_file = LaunchConfiguration('params_file')
     enable_bale_pipeline = LaunchConfiguration('enable_bale_pipeline')
     enable_lidar_driver = LaunchConfiguration('enable_lidar_driver')
+    enable_ws_server = LaunchConfiguration('enable_ws_server')
+    enable_health_check = LaunchConfiguration('enable_health_check')
+
+    health_check = ExecuteProcess(
+        cmd=[
+            'python3',
+            '/root/stack_can_ws/script/startup_health_check.py',
+            '--check-fix',
+            '--check-heading',
+            '--check-lidar',
+            '--fix-topic', '/fix',
+            '--heading-topic', '/heading_deg',
+            '--lidar-topic', '/rslidar_points',
+            '--startup-timeout', '3.0',
+            '--runtime-timeout', '2.0',
+        ],
+        name='startup_health_check',
+        output='screen',
+        condition=IfCondition(enable_health_check),
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -32,6 +54,30 @@ def generate_launch_description():
             'enable_lidar_driver',
             default_value='true',
             description='Launch robosense lidar driver'
+        ),
+        DeclareLaunchArgument(
+            'enable_ws_server',
+            default_value='true',
+            description='Launch GPS / heading / CSV websocket server'
+        ),
+        DeclareLaunchArgument(
+            'enable_health_check',
+            default_value='true',
+            description='Check /fix, /heading_deg and /rslidar_points at startup; shutdown launch if missing'
+        ),
+        health_check,
+
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=health_check,
+                on_exit=[
+                    EmitEvent(
+                        event=Shutdown(
+                            reason='startup_health_check exited: RTK/GPS/heading/lidar health check failed'
+                        )
+                    )
+                ],
+            )
         ),
 
         # ---------------- 基础定位 / 循迹链 ----------------
@@ -56,6 +102,16 @@ def generate_launch_description():
                 'min_satellites': 0
             }],
             output='screen'
+        ),
+
+        ExecuteProcess(
+            cmd=[
+                'python3',
+                '/root/stack_can_ws/script/server_all_ws.py'
+            ],
+            name='server_all_ws',
+            output='screen',
+            condition=IfCondition(enable_ws_server),
         ),
 
         Node(
