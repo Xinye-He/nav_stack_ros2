@@ -147,10 +147,12 @@ class TrajWaypointFollower(Node):
         self.declare_parameter('dead_reckon', True)
         self.declare_parameter('dr_alpha', 0.6)
         self.declare_parameter('dr_use_gps_speed', True)
+        self.declare_parameter('actual_speed_topic', '/ground_speed_mps')
 
         # Heading source (RTK)
         self.declare_parameter('use_rtk_heading', True)
         self.declare_parameter('rtk_heading_topic', '/gps/heading_deg')
+        self.declare_parameter('use_imu_fallback', False)
 
         # 离散速度/角度参数（基于你 stack 的实际档位）
         self.declare_parameter('vcu_speed_fast_kmh', 8.0)
@@ -225,10 +227,12 @@ class TrajWaypointFollower(Node):
         self.dr_x = None
         self.dr_y = None
         self.last_gps_speed = None
+        self.actual_speed_topic = self.get_parameter('actual_speed_topic').value
 
         # RTK heading source
         self.use_rtk_heading = bool(self.get_parameter('use_rtk_heading').value)
         self.rtk_heading_topic = self.get_parameter('rtk_heading_topic').value
+        self.use_imu_fallback = bool(self.get_parameter('use_imu_fallback').value)
 
         # VCU 离散控制相关参数
         self.vcu_speed_fast_kmh = float(self.get_parameter('vcu_speed_fast_kmh').value)
@@ -305,10 +309,12 @@ class TrajWaypointFollower(Node):
         self.create_subscription(NavSatFix, self.gps_topic, self.on_gps, qos_profile_sensor_data)
         if self.use_rtk_heading:
             self.create_subscription(Float32, self.rtk_heading_topic, self.on_rtk_heading, qos_profile_sensor_data)
-        else:
+        elif self.use_imu_fallback:
             self.create_subscription(Imu, self.imu_topic, self.on_imu, qos_profile_sensor_data)
+        else:
+            self.get_logger().warn('No RTK heading and IMU fallback is disabled; yaw will remain unavailable')
 
-        self.create_subscription(Float32, '/gps/ground_speed_mps',
+        self.create_subscription(Float32, self.actual_speed_topic,
                                  lambda m: setattr(self, 'last_gps_speed', float(m.data)),
                                  qos_profile_sensor_data)
         # 新增：重启路径 / 切换 CSV
@@ -556,7 +562,7 @@ class TrajWaypointFollower(Node):
                 self.dr_y = a * self.dr_y + (1.0 - a) * y
 
     def on_imu(self, msg: Imu):
-        if self.use_rtk_heading:
+        if self.use_rtk_heading or not self.use_imu_fallback:
             return
         q = msg.orientation
         yaw = math.atan2(

@@ -15,6 +15,7 @@ traj_waypoint_follower:
 
     use_rtk_heading: true
     rtk_heading_topic: "/vehicle_heading_deg"
+    use_imu_fallback: false
     yaw_offset_deg: 0.0
 
     # 几何控制
@@ -49,6 +50,7 @@ traj_waypoint_follower:
     dead_reckon: false
     dr_alpha: 0.3
     dr_use_gps_speed: true
+    actual_speed_topic: "/ground_speed_mps"
 
     # VCU 离散控制
     vcu_speed_fast_kmh: 4.0
@@ -89,6 +91,33 @@ stack_can_executor:
 
     vcu_speed_raw_offset_kmh: -50.0
     vcu_speed_raw_res_kmh_per_lsb: 0.5
+
+can_feedback_node:
+  ros__parameters:
+    enable_can: true
+    can_interface: "can0"
+    can_extended: true
+
+    # 电机实际转速反馈：byte1低字节，byte2高字节，1 rpm/bit
+    left_rpm_can_id: 0x0CF11E05
+    right_rpm_can_id: 0x0CF11E06
+
+    # VCU油门反馈：byte1=0~255对应0~5V，byte2=1表示CAN控制模式
+    left_throttle_can_id: 0x0CF1051E
+    right_throttle_can_id: 0x0CF1061E
+
+    # 需要按实车标定：如果报文是电机轴转速，填减速比；如果已经是轮速，保持1.0
+    wheel_radius_m: 0.315
+    motor_to_wheel_ratio: 1.0
+    wheel_track_m: 1.0
+    left_rpm_sign: 1.0
+    right_rpm_sign: 1.0
+
+    feedback_timeout_s: 0.5
+    publish_rate_hz: 50.0
+    feedback_topic: "/stack_can/feedback"
+    ground_speed_topic: "/ground_speed_mps"
+    yaw_rate_topic: "/wheel_yaw_rate_rad_s"
 
 bale_align_controller:
   ros__parameters:

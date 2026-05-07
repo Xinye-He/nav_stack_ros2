@@ -1,0 +1,29 @@
+builtin_interfaces/Time stamp
+
+bool rpm_left_valid
+bool rpm_right_valid
+bool throttle_left_valid
+bool throttle_right_valid
+
+uint32 left_rpm_id
+uint32 right_rpm_id
+uint32 left_throttle_id
+uint32 right_throttle_id
+
+float32 left_motor_rpm
+float32 right_motor_rpm
+float32 avg_motor_rpm
+
+float32 left_wheel_speed_mps
+float32 right_wheel_speed_mps
+float32 ground_speed_mps
+float32 yaw_rate_rad_s
+
+uint8 left_throttle_raw
+uint8 right_throttle_raw
+float32 left_throttle_v
+float32 right_throttle_v
+uint8 left_control_mode
+uint8 right_control_mode
+bool left_can_control
+bool right_can_control

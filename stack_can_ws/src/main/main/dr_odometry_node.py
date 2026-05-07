@@ -32,11 +32,15 @@ class DROdometry(Node):
 
         self.declare_parameter('speed_topic', '/ground_speed_mps')
         self.declare_parameter('heading_topic', '/vehicle_heading_deg')
+        self.declare_parameter('yaw_rate_topic', '/wheel_yaw_rate_rad_s')
         self.declare_parameter('odom_topic', '/dr/odom')
 
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
 
+        self.declare_parameter('use_heading', True)
+        self.declare_parameter('use_yaw_rate', True)
+        self.declare_parameter('heading_timeout_s', 0.5)
         self.declare_parameter('yaw_offset_deg', 0.0)
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('rate_hz', 50.0)
@@ -44,10 +48,14 @@ class DROdometry(Node):
 
         self.speed_topic = self.get_parameter('speed_topic').value
         self.heading_topic = self.get_parameter('heading_topic').value
+        self.yaw_rate_topic = self.get_parameter('yaw_rate_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
 
+        self.use_heading = bool(self.get_parameter('use_heading').value)
+        self.use_yaw_rate = bool(self.get_parameter('use_yaw_rate').value)
+        self.heading_timeout_s = float(self.get_parameter('heading_timeout_s').value)
         self.yaw_offset = math.radians(float(self.get_parameter('yaw_offset_deg').value))
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
         self.fallback_speed = float(self.get_parameter('fallback_speed').value)
@@ -57,18 +65,25 @@ class DROdometry(Node):
         self.first_publish = True  # For "only once" option
 
         self.sub_v = self.create_subscription(Float32, self.speed_topic, self.on_speed, qos_profile_sensor_data)
-        self.sub_h = self.create_subscription(Float32, self.heading_topic, self.on_heading, qos_profile_sensor_data)
+        self.sub_h = None
+        if self.use_heading:
+            self.sub_h = self.create_subscription(Float32, self.heading_topic, self.on_heading, qos_profile_sensor_data)
+        self.sub_yaw_rate = None
+        if self.use_yaw_rate:
+            self.sub_yaw_rate = self.create_subscription(Float32, self.yaw_rate_topic, self.on_yaw_rate, qos_profile_sensor_data)
 
         self.pub_odom = self.create_publisher(Odometry, self.odom_topic, 10)
         self.tfb = TransformBroadcaster(self) if self.publish_tf else None
 
         self.v_mps: Optional[float] = None
+        self.yaw_rate: Optional[float] = None
         self.yaw_meas: Optional[float] = None
 
         self.x = 0.0
         self.y = 0.0
         self.yaw_cont: Optional[float] = None
         self.last_yaw_meas: Optional[float] = None
+        self.last_heading_time: Optional[float] = None
 
         self.last_time = self.get_clock().now()
         self.create_timer(self.dt_timer, self.on_timer)
@@ -90,6 +105,7 @@ class DROdometry(Node):
         yaw = wrap_pi(yaw + self.yaw_offset)
         self.yaw_meas = yaw
         self.get_logger().debug(f"Received heading: {hdg} deg, converted to yaw: {yaw} rad")
+        self.last_heading_time = self.get_clock().now().nanoseconds * 1e-9
 
         if self.last_yaw_meas is None:
             self.last_yaw_meas = yaw
@@ -98,6 +114,13 @@ class DROdometry(Node):
             dy = wrap_pi(yaw - self.last_yaw_meas)
             self.last_yaw_meas = yaw
             self.yaw_cont = (self.yaw_cont + dy) if (self.yaw_cont is not None) else yaw
+
+    def on_yaw_rate(self, msg: Float32):
+        wz = float(msg.data)
+        if math.isfinite(wz):
+            self.yaw_rate = wz
+        else:
+            self.get_logger().warn("Received non-finite yaw-rate data")
 
     def on_timer(self):
         now = self.get_clock().now()
@@ -108,8 +131,21 @@ class DROdometry(Node):
 
         v = self.v_mps if self.v_mps is not None else self.fallback_speed
         if self.yaw_cont is None:
-            self.get_logger().warn("No heading data; not publishing odom -> base_link")
-            return
+            if self.use_yaw_rate and self.yaw_rate is not None:
+                self.yaw_cont = 0.0
+                self.get_logger().warn("No heading data; initialized DR yaw from 0 and using wheel yaw-rate")
+            else:
+                self.get_logger().warn("No heading/yaw-rate data; not publishing odom -> base_link")
+                return
+
+        now_sec = now.nanoseconds * 1e-9
+        heading_fresh = (
+            self.use_heading and
+            self.last_heading_time is not None and
+            (now_sec - self.last_heading_time) <= self.heading_timeout_s
+        )
+        if self.use_yaw_rate and self.yaw_rate is not None and not heading_fresh:
+            self.yaw_cont += self.yaw_rate * dt
 
         self.x += v * math.cos(self.yaw_cont) * dt
         self.y += v * math.sin(self.yaw_cont) * dt
@@ -130,6 +166,8 @@ class DROdometry(Node):
         odom.pose.pose.orientation.z = float(qz)
         odom.pose.pose.orientation.w = float(qw)
         odom.twist.twist.linear.x = float(v)
+        if self.yaw_rate is not None:
+            odom.twist.twist.angular.z = float(self.yaw_rate)
         self.pub_odom.publish(odom)
 
         if self.tfb is not None and self.publish_tf:

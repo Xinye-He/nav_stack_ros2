@@ -30,6 +30,7 @@ setup(
             'teleop_key             = main.teleop_key:main',
             'rtk_center_from_nmea   = main.rtk_center_from_nmea:main',
             'dr_odometry_node       = main.dr_odometry_node:main',
+            'can_feedback_node      = main.can_feedback_node:main',
             'websocket_teleop_key   = main.websocket_teleop_key:main',
             'bale_align_controller  = main.bale_align_controller:main',
             'geofence_monitor       = main.geofence_monitor:main',

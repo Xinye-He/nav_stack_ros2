@@ -31,14 +31,25 @@ def generate_launch_description():
         # ---------------- 基础定位 / 循迹链 ----------------
         Node(
             package='main',
+            executable='can_feedback_node',
+            name='can_feedback_node',
+            output='screen',
+            parameters=[params_file],
+        ),
+
+        Node(
+            package='main',
             executable='dr_odometry_node',
             name='dr_odometry',
             parameters=[{
                 'speed_topic': '/ground_speed_mps',
                 'heading_topic': '/vehicle_heading_deg',
+                'yaw_rate_topic': '/wheel_yaw_rate_rad_s',
                 'odom_topic': '/dr/odom',
                 'odom_frame': 'odom',
                 'base_frame': 'base_link',
+                'use_heading': True,
+                'use_yaw_rate': True,
                 'yaw_offset_deg': 0.0,
                 'publish_tf': True,
                 'rate_hz': 50.0

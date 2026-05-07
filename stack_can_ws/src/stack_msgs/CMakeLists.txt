@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/StackCommand.msg"
   "msg/BaleTarget.msg"
   "msg/StackCanStatus.msg"
+  "msg/CanFeedback.msg"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

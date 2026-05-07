@@ -36,15 +36,6 @@ def generate_launch_description():
 
         # ---------------- 基础定位 / 循迹链 ----------------
         Node(
-            package='imu_driver',
-            executable='imu_driver',
-            name='imu',
-            remappings=[('/imu/data_raw', '/imu/data')],
-            parameters=[{'port': '/dev/imu_usb'}, {'baud': 9600}],
-            output='screen'
-        ),
-
-        Node(
             package='nmea_bridge',
             executable='nmea_bridge_node',
             name='nmea_bridge',
@@ -56,6 +47,14 @@ def generate_launch_description():
                 'min_satellites': 0
             }],
             output='screen'
+        ),
+
+        Node(
+            package='main',
+            executable='can_feedback_node',
+            name='can_feedback_node',
+            output='screen',
+            parameters=[params_file],
         ),
 
         Node(
@@ -86,9 +85,12 @@ def generate_launch_description():
             parameters=[{
                 'speed_topic': '/ground_speed_mps',
                 'heading_topic': '/vehicle_heading_deg',
+                'yaw_rate_topic': '/wheel_yaw_rate_rad_s',
                 'odom_topic': '/dr/odom',
                 'odom_frame': 'odom',
                 'base_frame': 'base_link',
+                'use_heading': True,
+                'use_yaw_rate': True,
                 'yaw_offset_deg': 0.0,
                 'publish_tf': True,
                 'rate_hz': 50.0

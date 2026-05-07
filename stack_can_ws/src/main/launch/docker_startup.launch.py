@@ -35,15 +35,6 @@ def generate_launch_description():
         ),
 
         Node(
-            package='imu_driver',
-            executable='imu_driver',
-            name='imu',
-            remappings=[('/imu/data_raw', '/imu/data')],
-            parameters=[{'port': '/dev/imu_usb'}, {'baud': 9600}],
-            output='screen'
-        ),
-
-        Node(
             package='nmea_bridge',
             executable='nmea_bridge_node',
             name='nmea_bridge',
@@ -65,6 +56,14 @@ def generate_launch_description():
             name='server_all_ws',
             output='screen',
             condition=IfCondition(enable_ws_server),
+        ),
+
+        Node(
+            package='main',
+            executable='can_feedback_node',
+            name='can_feedback_node',
+            output='screen',
+            parameters=[params_file],
         ),
 
         Node(
