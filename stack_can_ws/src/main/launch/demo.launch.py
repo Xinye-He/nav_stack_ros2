@@ -1,7 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler, EmitEvent
-from launch.event_handlers import OnProcessExit
-from launch.events import Shutdown
+from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, EnvironmentVariable
 from launch_ros.actions import Node
@@ -17,27 +15,6 @@ def generate_launch_description():
 
     params_file = LaunchConfiguration('params_file')
     enable_bale_pipeline = LaunchConfiguration('enable_bale_pipeline')
-    enable_lidar_driver = LaunchConfiguration('enable_lidar_driver')
-    enable_ws_server = LaunchConfiguration('enable_ws_server')
-    enable_health_check = LaunchConfiguration('enable_health_check')
-
-    health_check = ExecuteProcess(
-        cmd=[
-            'python3',
-            '/root/stack_can_ws/script/startup_health_check.py',
-            '--check-fix',
-            '--check-heading',
-            '--check-lidar',
-            '--fix-topic', '/fix',
-            '--heading-topic', '/heading_deg',
-            '--lidar-topic', '/rslidar_points',
-            '--startup-timeout', '3.0',
-            '--runtime-timeout', '2.0',
-        ],
-        name='startup_health_check',
-        output='screen',
-        condition=IfCondition(enable_health_check),
-    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -50,91 +27,8 @@ def generate_launch_description():
             default_value='true',
             description='Launch bale detector + bale align controller'
         ),
-        DeclareLaunchArgument(
-            'enable_lidar_driver',
-            default_value='true',
-            description='Launch robosense lidar driver'
-        ),
-        DeclareLaunchArgument(
-            'enable_ws_server',
-            default_value='true',
-            description='Launch GPS / heading / CSV websocket server'
-        ),
-        DeclareLaunchArgument(
-            'enable_health_check',
-            default_value='true',
-            description='Check /fix, /heading_deg and /rslidar_points at startup; shutdown launch if missing'
-        ),
-        health_check,
-
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=health_check,
-                on_exit=[
-                    EmitEvent(
-                        event=Shutdown(
-                            reason='startup_health_check exited: RTK/GPS/heading/lidar health check failed'
-                        )
-                    )
-                ],
-            )
-        ),
 
         # ---------------- 基础定位 / 循迹链 ----------------
-        Node(
-            package='imu_driver',
-            executable='imu_driver',
-            name='imu',
-            remappings=[('/imu/data_raw', '/imu/data')],
-            parameters=[{'port': '/dev/imu_usb'}, {'baud': 9600}],
-            output='screen'
-        ),
-
-        Node(
-            package='nmea_bridge',
-            executable='nmea_bridge_node',
-            name='nmea_bridge',
-            parameters=[{
-                'port': '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0',
-                'baudrate': 115200,
-                'frame_id': 'gps_main',
-                'check_crc': True,
-                'min_satellites': 0
-            }],
-            output='screen'
-        ),
-
-        ExecuteProcess(
-            cmd=[
-                'python3',
-                '/root/stack_can_ws/script/server_all_ws.py'
-            ],
-            name='server_all_ws',
-            output='screen',
-            condition=IfCondition(enable_ws_server),
-        ),
-
-        Node(
-            package='main',
-            executable='rtk_center_from_nmea',
-            name='rtk_center_from_nmea',
-            parameters=[{
-                'fix_topic': '/fix',
-                'heading_topic': '/heading_deg',
-                'out_fix_center_topic': '/fix_center',
-                'out_vehicle_heading_topic': '/vehicle_heading_deg',
-                'main_to_center_x': -1.35,
-                'main_to_center_y': -0.75,
-                'main_to_center_z': 0.0,
-                'heading_from_north_cw': True,
-                'heading_offset_deg': 0.0,
-                'baseline_to_vehicle_yaw_offset_deg': 90.0,
-                'publish_tf': False,
-                'set_origin_on_first_center_fix': False,
-            }],
-            output='screen'
-        ),
-
         Node(
             package='main',
             executable='dr_odometry_node',
@@ -177,20 +71,6 @@ def generate_launch_description():
         ),
 
         # ---------------- 草捆链（正式流程） ----------------
-        Node(
-            package='robosense_driver',
-            executable='rsview',
-            name='rsview',
-            output='screen',
-            parameters=[params_file],
-            arguments=[
-                '-host', '192.168.1.102',
-                '-msop', '6699',
-                '-difop', '7788',
-            ],
-            condition=IfCondition(enable_lidar_driver),
-        ),
-
         Node(
             package='robosense_driver',
             executable='bale_detector',

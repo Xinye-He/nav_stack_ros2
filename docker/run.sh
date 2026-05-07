@@ -3,9 +3,8 @@
 # Start an instance of the jetson-inference docker container.
 # See below or run this script with -h or --help to see usage options.
 #
-# This script should be run from the root dir of the jetson-inference project:
+# This script should be run from the root dir of the nav_stack_ros2 project:
 #
-#     $ cd /path/to/your/jetson-inference
 #     $ docker/run.sh
 #
 
@@ -16,8 +15,13 @@ die() {
 }
 
 # paths to some project directories
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+REPO_PARENT="$(dirname "$REPO_ROOT")"
 NETWORKS_DIR="data/networks"
 DOCKER_ROOT="/root"	# where the project resides inside docker
+LIDAR_ROSBAG_DIR="${LIDAR_ROSBAG_DIR:-$REPO_PARENT/lidar_rosbag}"
+STACK_CAN_WS_DIR="${STACK_CAN_WS_DIR:-$REPO_ROOT/stack_can_ws}"
 
 # parse user arguments
 USER_COMMAND=""
@@ -59,6 +63,8 @@ print_var "DATA_VOLUME"
 print_var "DEV_VOLUME"
 print_var "USER_VOLUME"
 print_var "USER_COMMAND"
+print_var "LIDAR_ROSBAG_DIR"
+print_var "STACK_CAN_WS_DIR"
 print_var "V4L2_DEVICES"
 print_var "DISPLAY_DEVICE"
 
@@ -75,8 +81,7 @@ docker run --runtime nvidia -it --rm \
 	-v /tmp/nv_jetson_model:/tmp/nv_jetson_model \
 	-v /var/run/dbus:/var/run/dbus \
 	-v /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket \
-	-v /home/xinye30/lidar_rosbag:/root/lidar_rosbag \
-	-v /home/xinye30/nav_stack_ros2/stack_can_ws:/root/stack_can_ws \
+	-v "$STACK_CAN_WS_DIR:/root/stack_can_ws" \
 	--volume /dev:/dev \
 	--device /dev \
 	--group-add dialout \

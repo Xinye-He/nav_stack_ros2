@@ -6,8 +6,11 @@ die() {
 }
 
 # paths to some project directories
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 NETWORKS_DIR="data/networks"
 DOCKER_ROOT="/root"     # where the project resides inside docker
+STACK_CAN_WS_DIR="${STACK_CAN_WS_DIR:-$REPO_ROOT/stack_can_ws}"
 
 # parse user arguments
 USER_COMMAND="$*"
@@ -46,6 +49,7 @@ print_var "DATA_VOLUME"
 print_var "DEV_VOLUME"
 print_var "USER_VOLUME"
 print_var "USER_COMMAND"
+print_var "STACK_CAN_WS_DIR"
 print_var "V4L2_DEVICES"
 print_var "DISPLAY_DEVICE"
 
@@ -61,6 +65,7 @@ docker run --runtime nvidia -it --rm \
     -e ROS_DISTRO="${ROS_DISTRO}" \
     -e ROS_WS="${ROS_WS:-$DOCKER_ROOT/stack_can_ws}" \
     -e TGT_CMD="${USER_COMMAND:-}" \
+    -e START_DOCKER_STARTUP \
     -e RMW_IMPLEMENTATION \
     -e ROS_DOMAIN_ID \
     -v /tmp/argus_socket:/tmp/argus_socket \
@@ -69,8 +74,7 @@ docker run --runtime nvidia -it --rm \
     -v /tmp/nv_jetson_model:/tmp/nv_jetson_model \
     -v /var/run/dbus:/var/run/dbus \
     -v /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket \
-    -v /home/xinye30/lidar_rosbag:/root/lidar_rosbag \
-    -v /home/xinye30/nav_stack_ros2/stack_can_ws:/root/stack_can_ws \
+    -v "$STACK_CAN_WS_DIR:/root/stack_can_ws" \
     --volume /dev:/dev \
     --device /dev \
     --group-add dialout \
@@ -79,7 +83,7 @@ docker run --runtime nvidia -it --rm \
     $DATA_VOLUME $USER_VOLUME $DEV_VOLUME \
     "$CONTAINER_IMAGE" \
     bash -lc '
-      set -e
+      set +e
 
       # 自动探测 ROS_DISTRO（未传则从已安装版本中选择）
       if [ -z "$ROS_DISTRO" ]; then
@@ -116,13 +120,26 @@ docker run --runtime nvidia -it --rm \
         echo "[container] WARN: $SCRIPT_DIR/csv_receive_all.py 不存在，跳过启动"
       fi
 
-      # 默认命令：跟随模式的 launch（你也可以在调用脚本时覆盖）
+      START_DOCKER_STARTUP="${START_DOCKER_STARTUP:-true}"
+      if [ "$START_DOCKER_STARTUP" = "true" ]; then
+        echo "[container] start docker_startup.launch.py in background ..."
+        nohup ros2 launch main docker_startup.launch.py > /tmp/docker_startup.log 2>&1 &
+        STARTUP_PID=$!
+        echo "[container] docker_startup.launch.py 已启动 (PID: $STARTUP_PID)，日志: /tmp/docker_startup.log"
+        sleep 1
+      fi
+
+      # 默认流程：健康检查通过后启动 demo.launch.py；失败则保留容器 shell 便于复位后重试。
       if [ -z "$TGT_CMD" ]; then
-        TGT_CMD="ros2 launch main follow.launch.py"
+        TGT_CMD="$ROS_WS/script/start_demo_after_health_check.sh"
       fi
 
       echo "[container] exec: $TGT_CMD"
-      eval "$TGT_CMD" || true
+      eval "$TGT_CMD"
+      CMD_STATUS=$?
+      if [ "$CMD_STATUS" -ne 0 ]; then
+        echo "[container] command exited with status $CMD_STATUS"
+      fi
       # 命令结束后留在交互 shell，便于看日志/排障
       exec bash
     '

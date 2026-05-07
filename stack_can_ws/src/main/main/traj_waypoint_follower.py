@@ -101,6 +101,10 @@ class TrajWaypointFollower(Node):
     DS_RUNNING = 1
     DS_ESTOP  = 2
 
+    PT_NORMAL = 0
+    PT_TASK = 1
+    PT_UNLOAD = 2
+
     def __init__(self):
         super().__init__('traj_waypoint_follower')
 
@@ -126,6 +130,9 @@ class TrajWaypointFollower(Node):
         self.declare_parameter('stop_turn_tol_deg', 5.0)
         self.declare_parameter('wait_for_task_done', True)
         self.declare_parameter('task_done_topic', '/task_done')
+        self.declare_parameter('unload_hold_time_s', 30.0)
+        self.declare_parameter('unload_reset_time_s', 2.0)
+        self.declare_parameter('legacy_final_task_unload', True)
 
         # Lookahead
         self.declare_parameter('lookahead_dist', 1.5)
@@ -200,6 +207,9 @@ class TrajWaypointFollower(Node):
         self.stop_turn_tol = math.radians(self.stop_turn_tol_deg)
         self.wait_for_task_done = bool(self.get_parameter('wait_for_task_done').value)
         self.task_done_topic = self.get_parameter('task_done_topic').value
+        self.unload_hold_time_s = float(self.get_parameter('unload_hold_time_s').value)
+        self.unload_reset_time_s = float(self.get_parameter('unload_reset_time_s').value)
+        self.legacy_final_task_unload = bool(self.get_parameter('legacy_final_task_unload').value)
 
         self.lookahead_dist = float(self.get_parameter('lookahead_dist').value)
 
@@ -285,6 +295,8 @@ class TrajWaypointFollower(Node):
         self.unload_end_time = 0.0
         self.unload_reset_end_time = 0.0
         self.unload_finished_once = False
+        self.unload_target_idx = -1
+        self.completed_unload_indices = set()
 
         # Drive state
         self.drive_state = self.DS_PAUSED
@@ -368,6 +380,8 @@ class TrajWaypointFollower(Node):
                 self.unload_end_time = 0.0
                 self.unload_reset_end_time = 0.0
                 self.unload_finished_once = False
+                self.unload_target_idx = -1
+                self.completed_unload_indices.clear()
             self.drive_state = self.DS_RUNNING
             self._pub_waiting(False)
             self.get_logger().info("Path reloaded, seg_idx=0, drive_state=RUNNING")
@@ -472,6 +486,59 @@ class TrajWaypointFollower(Node):
         else:
             self.get_logger().info("Exit task waiting state (/at_task_waiting = False)")
 
+    def is_unload_point(self, pt_type: int, point_idx: int, total_points: int) -> bool:
+        if int(pt_type) == self.PT_UNLOAD:
+            return True
+        # 兼容旧 CSV：多点路径里最后一个 type=1 仍按原逻辑卸货。
+        return (
+            self.legacy_final_task_unload and
+            total_points > 1 and
+            point_idx == total_points - 1 and
+            int(pt_type) == self.PT_TASK
+        )
+
+    def start_unload(self, target_idx: int, now_sec: float, dist_to_target: float):
+        self.unload_mode = True
+        self.unload_target_idx = int(target_idx)
+        self.unload_end_time = now_sec + max(0.0, self.unload_hold_time_s)
+        self.unload_reset_end_time = self.unload_end_time + max(0.0, self.unload_reset_time_s)
+        self.drive_state = self.DS_PAUSED
+        self.waiting_for_task = False
+        self.spin_state = 'IDLE'
+        self.angle_sign = 0
+        self._pub_waiting(False)
+        self.publish_traj_cmd(
+            self.vcu_speed_stop_kmh, 0.0, dist_to_target,
+            unload=True
+        )
+        self.get_logger().info(
+            f"Enter unload mode at waypoint {target_idx}, "
+            f"unload=1 for {self.unload_hold_time_s:.1f}s then unload=0 for {self.unload_reset_time_s:.1f}s"
+        )
+
+    def finish_unload(self):
+        target_idx = self.unload_target_idx
+        n = len(self.waypoints_xy)
+
+        self.unload_mode = False
+        self.unload_finished_once = True
+        if 0 <= target_idx < n:
+            self.completed_unload_indices.add(target_idx)
+
+        self.unload_target_idx = -1
+        self.waiting_for_task = False
+        self.spin_state = 'IDLE'
+        self.angle_sign = 0
+        self._pub_waiting(False)
+
+        if 0 <= target_idx < n - 1:
+            self.seg_idx = target_idx
+            self.drive_state = self.DS_RUNNING
+            self.get_logger().info(f"Unload finished at waypoint {target_idx}, resume following")
+        else:
+            self.drive_state = self.DS_PAUSED
+            self.get_logger().info("Unload finished at final waypoint, stop")
+
     # ---- Sensors ----
     def on_gps(self, msg: NavSatFix):
         if msg.status.status < 0:
@@ -521,7 +588,6 @@ class TrajWaypointFollower(Node):
         if self.unload_mode:
             self.drive_state = self.DS_PAUSED
             self.waiting_for_task = False
-            self._pub_waiting(False)
 
             # 阶段1：持续保持 unload=True
             if now_sec < self.unload_end_time:
@@ -537,15 +603,13 @@ class TrajWaypointFollower(Node):
                     unload=False
                 )
 
-            # 完成：退出卸货模式，并锁存“已卸货完成”
+            # 完成：退出卸货模式；中间卸货点继续走，最后卸货点停车
             else:
-                self.unload_mode = False
-                self.unload_finished_once = True
                 self.publish_traj_cmd(
                     self.vcu_speed_stop_kmh, 0.0, 0.0,
                     unload=False
                 )
-                self.get_logger().info("Unload finished, unload reset done, latch unload_finished_once=True")
+                self.finish_unload()
 
             # 这里不要用尚未定义的 px/py，直接用当前位置
             self.publish_map_to_odom(self.cur_x, self.cur_y, self.cur_yaw)
@@ -662,7 +726,7 @@ class TrajWaypointFollower(Node):
         use_wp_heading = (
             self.use_csv_heading and
             dist_to_next < self.heading_align_dist and
-            (pt_type_j == 1 or j == n - 1)
+            (int(pt_type_j) in (self.PT_TASK, self.PT_UNLOAD) or j == n - 1)
         )
         if use_wp_heading:
             hdg_des = yaw_wp
@@ -688,12 +752,14 @@ class TrajWaypointFollower(Node):
             hdg_err_to_next_deg = heading_err_deg
         corner_angle_deg = math.degrees(dpsi)
 
-        # 任务点：到点并对正 -> 进入 waiting 状态
-        if pt_type_j == 1:
+        is_task_point = (int(pt_type_j) == self.PT_TASK)
+        is_unload_point = self.is_unload_point(pt_type_j, j, n)
+        is_action_point = is_task_point or is_unload_point
+
+        # 动作点：到点并对正 -> type=1 等任务完成，type=2 执行卸货
+        if is_action_point:
             hdg_err_to_wp = wrap_pi(yaw_wp - self.cur_yaw)
             hdg_err_to_wp_deg = math.degrees(hdg_err_to_wp)
-            
-            is_last_point = (j == n - 1)  # 最后一个点
 
             if dist_to_next <= self.wp_reached_dist:
                 if abs(hdg_err_to_wp_deg) > self.stop_turn_tol_deg:
@@ -714,50 +780,36 @@ class TrajWaypointFollower(Node):
                     return
                 else:
                     # 已对正
-                    if is_last_point:
-                        # 已经完成过最后点卸货：只保持停车，不再重复进入卸货模式
-                        if self.unload_finished_once:
+                    if is_unload_point:
+                        if j in self.completed_unload_indices:
                             self.drive_state = self.DS_PAUSED
                             self.waiting_for_task = False
                             self.spin_state = 'IDLE'
                             self.angle_sign = 0
                             self._pub_waiting(False)
                             self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next, unload=False)
+                            if j < n - 1:
+                                self.seg_idx = j
+                                self.drive_state = self.DS_RUNNING
                             self.publish_map_to_odom(px, py, self.cur_yaw)
                             return
 
-                        # ---- 第一次到最后一个任务点：进入卸货模式 ----
-                        self.unload_mode = True
-                        self.unload_end_time = now_sec + 30.0            # 卸货保持 50 秒
-                        self.unload_reset_end_time = self.unload_end_time + 2.0  # 再给 2 秒显式复位
-                        self.drive_state = self.DS_PAUSED
-                        self.waiting_for_task = False
-                        self.spin_state = 'IDLE'
-                        self.angle_sign = 0
-
-                        # 不进入 waiting_for_task，防止草捆对准块接管
-                        self._pub_waiting(False)
-
-                        self.publish_traj_cmd(
-                            self.vcu_speed_stop_kmh, 0.0, dist_to_next,
-                            unload=True
-                        )
-                        self.get_logger().info("Enter unload mode at last waypoint, unload=1 for 50s then unload=0 for 2s")
+                        self.start_unload(j, now_sec, dist_to_next)
                         self.publish_map_to_odom(px, py, self.cur_yaw)
                         return
-                    else:
-                        self.waiting_for_task = True
-                        self.drive_state = self.DS_PAUSED
-                        self.spin_state = 'IDLE'
-                        self.angle_sign = 0
-                        self._pub_waiting(True)
-                        self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next)
-                        self.publish_map_to_odom(px, py, self.cur_yaw)
-                        return
+
+                    self.waiting_for_task = True
+                    self.drive_state = self.DS_PAUSED
+                    self.spin_state = 'IDLE'
+                    self.angle_sign = 0
+                    self._pub_waiting(True)
+                    self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist_to_next)
+                    self.publish_map_to_odom(px, py, self.cur_yaw)
+                    return
             # 未到点：继续正常控制
 
         # 普通点：段切换
-        if pt_type_j != 1:
+        if not is_action_point:
             if (self.seg_idx < n - 2) and (tproj > self.t_advance_min and dist_to_next < self.advance_when_close):
                 self.seg_idx += 1
                 self.publish_map_to_odom(px, py, self.cur_yaw)
@@ -887,16 +939,19 @@ class TrajWaypointFollower(Node):
     def control_single_point(self, px, py, xj, yj, yaw_wp, pt_type, now_sec: float):
         dist = math.hypot(px - xj, py - yj)
         seg_hdg = math.atan2(yj - py, xj - px)
+        is_task_point = (int(pt_type) == self.PT_TASK)
+        is_unload_point = self.is_unload_point(pt_type, 0, 1)
+        is_action_point = is_task_point or is_unload_point
         use_wp_heading = (
             self.use_csv_heading and
             dist < self.heading_align_dist and
-            (pt_type == 1)
+            is_action_point
         )
         hdg_des = yaw_wp if use_wp_heading else seg_hdg
         heading_error = wrap_pi(hdg_des - self.cur_yaw)
         heading_err_deg = math.degrees(heading_error)
 
-        if pt_type == 1 and dist <= self.wp_reached_dist:
+        if is_action_point and dist <= self.wp_reached_dist:
             hdg_err_to_wp = wrap_pi(yaw_wp - self.cur_yaw)
             hdg_err_to_wp_deg = math.degrees(hdg_err_to_wp)
             if abs(hdg_err_to_wp_deg) > self.stop_turn_tol_deg:
@@ -913,6 +968,18 @@ class TrajWaypointFollower(Node):
                                 min(self.vcu_angle_move_limit_deg, angle_deg))
                 self.publish_traj_cmd(pre_kmh, angle_deg, dist)
             else:
+                if is_unload_point:
+                    if 0 in self.completed_unload_indices:
+                        self.drive_state = self.DS_PAUSED
+                        self.waiting_for_task = False
+                        self.spin_state = 'IDLE'
+                        self.angle_sign = 0
+                        self._pub_waiting(False)
+                        self.publish_traj_cmd(self.vcu_speed_stop_kmh, 0.0, dist, unload=False)
+                    else:
+                        self.start_unload(0, now_sec, dist)
+                    return
+
                 self.waiting_for_task = True
                 self.drive_state = self.DS_PAUSED
                 self.spin_state = 'IDLE'

@@ -125,6 +125,19 @@ class StartupHealthCheck(Node):
         # 自己强制退出，确保不会继续运行
         os._exit(exit_code)
 
+    def exit_with_status(self, title, reasons, exit_code):
+        if reasons:
+            self.get_logger().error("")
+            self.get_logger().error(title)
+            for reason in reasons:
+                self.get_logger().error(reason)
+            self.get_logger().error("=" * 60)
+        else:
+            self.get_logger().info(title)
+
+        time.sleep(0.2)
+        os._exit(exit_code)
+
     def check_once(self):
         elapsed = time.time() - self.start_time
 
@@ -134,6 +147,13 @@ class StartupHealthCheck(Node):
         reasons = self.missing_reasons(self.args.startup_timeout)
 
         if reasons:
+            if self.args.once:
+                self.exit_with_status(
+                    "========== DEMO 启动检查失败，demo.launch.py 不会启动 ==========",
+                    reasons,
+                    2
+                )
+
             self.shutdown_launch(
                 "========== DEMO 启动失败，主动终止 ==========",
                 reasons,
@@ -141,6 +161,14 @@ class StartupHealthCheck(Node):
             )
 
         self.get_logger().info("Startup health check passed")
+
+        if self.args.once:
+            self.exit_with_status(
+                "========== DEMO 启动检查通过 ==========",
+                [],
+                0
+            )
+
         self.timer.cancel()
         self.timer = self.create_timer(1.0, self.runtime_check)
 
@@ -168,6 +196,11 @@ def main():
 
     parser.add_argument("--startup-timeout", type=float, default=3.0)
     parser.add_argument("--runtime-timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run only the startup check and exit without signalling the parent process."
+    )
 
     args = parser.parse_args()
 

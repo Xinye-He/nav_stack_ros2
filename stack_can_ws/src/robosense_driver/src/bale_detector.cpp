@@ -69,6 +69,7 @@ public:
     // 一个简单的二维占据率，用于剔除特别稀疏/细碎的簇
     occupancy_grid_res_m_ = this->declare_parameter<float>("occupancy_grid_res_m", 0.08f);
     fill_ratio_min_       = this->declare_parameter<float>("fill_ratio_min", 0.18f);
+    log_detection_results_ = this->declare_parameter<bool>("log_detection_results", false);
 
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_points",
@@ -660,18 +661,20 @@ private:
     tgt.valid      = true;
     bale_target_pub_->publish(tgt);
 
-    RCLCPP_INFO_THROTTLE(
-      this->get_logger(), *this->get_clock(), 500,
-      "Nearest bale: R=%.2f m, angle=%.1f deg, center=(%.2f, %.2f), "
-      "size=(%.2f, %.2f), z_span=%.2f, fill=%.2f",
-      best_R,
-      tgt.angle_deg,
-      best_candidate.center_xy.x(),
-      best_candidate.center_xy.y(),
-      best_candidate.len_major,
-      best_candidate.len_minor,
-      best_candidate.z_span,
-      best_candidate.fill_ratio);
+    if (log_detection_results_) {
+      RCLCPP_INFO_THROTTLE(
+        this->get_logger(), *this->get_clock(), 500,
+        "Nearest bale: R=%.2f m, angle=%.1f deg, center=(%.2f, %.2f), "
+        "size=(%.2f, %.2f), z_span=%.2f, fill=%.2f",
+        best_R,
+        tgt.angle_deg,
+        best_candidate.center_xy.x(),
+        best_candidate.center_xy.y(),
+        best_candidate.len_major,
+        best_candidate.len_minor,
+        best_candidate.z_span,
+        best_candidate.fill_ratio);
+    }
   }
 
   template<typename PointT>
@@ -795,6 +798,7 @@ private:
 
   float occupancy_grid_res_m_;
   float fill_ratio_min_;
+  bool log_detection_results_;
 };
 
 int main(int argc, char ** argv)

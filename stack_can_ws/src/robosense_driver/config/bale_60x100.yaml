@@ -39,6 +39,7 @@ bale_pose_estimator:
 
     # 可视化
     publish_text_marker: true
+    log_detection_results: false
 
     # 离线回放时建议 true；在线实时设 false
     use_sim_time: true
@@ -50,3 +51,7 @@ bale_pose_estimator:
     # pitch_min_deg: -45.0 # 传感器坐标系下的仰俯角
     # pitch_max_deg: +45.0
     # use_fov_gate: false
+
+bale_detector:
+  ros__parameters:
+    log_detection_results: false
