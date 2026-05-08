@@ -10,7 +10,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import NavSatFix, PointCloud2
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Float32MultiArray
+from stack_msgs.msg import CanFeedback
 
 
 class StartupHealthCheck(Node):
@@ -23,6 +24,9 @@ class StartupHealthCheck(Node):
         self.last_fix_time = None
         self.last_heading_time = None
         self.last_lidar_time = None
+        self.last_ultrasonic_time = None
+        self.last_can_time = None
+        self.last_can_valid = False
 
         qos_sensor = QoSProfile(
             depth=10,
@@ -53,12 +57,30 @@ class StartupHealthCheck(Node):
                 qos_sensor
             )
 
+        if args.check_ultrasonic:
+            self.create_subscription(
+                Float32MultiArray,
+                args.ultrasonic_topic,
+                self.ultrasonic_cb,
+                qos_sensor
+            )
+
+        if args.check_can:
+            self.create_subscription(
+                CanFeedback,
+                args.can_feedback_topic,
+                self.can_feedback_cb,
+                10
+            )
+
         self.timer = self.create_timer(0.5, self.check_once)
 
         self.get_logger().info("Startup health check started")
         self.get_logger().info(f"check_fix={args.check_fix}, topic={args.fix_topic}")
         self.get_logger().info(f"check_heading={args.check_heading}, topic={args.heading_topic}")
         self.get_logger().info(f"check_lidar={args.check_lidar}, topic={args.lidar_topic}")
+        self.get_logger().info(f"check_ultrasonic={args.check_ultrasonic}, topic={args.ultrasonic_topic}")
+        self.get_logger().info(f"check_can={args.check_can}, topic={args.can_feedback_topic}")
         self.get_logger().info(
             f"startup_timeout={args.startup_timeout}s, runtime_timeout={args.runtime_timeout}s"
         )
@@ -73,6 +95,19 @@ class StartupHealthCheck(Node):
 
     def lidar_cb(self, msg: PointCloud2):
         self.last_lidar_time = time.time()
+
+    def ultrasonic_cb(self, msg: Float32MultiArray):
+        if len(msg.data) >= 4 and any(v > 0.0 for v in msg.data[:4]):
+            self.last_ultrasonic_time = time.time()
+
+    def can_feedback_cb(self, msg: CanFeedback):
+        self.last_can_time = time.time()
+        self.last_can_valid = (
+            msg.rpm_left_valid or
+            msg.rpm_right_valid or
+            msg.throttle_left_valid or
+            msg.throttle_right_valid
+        )
 
     def missing_reasons(self, timeout):
         now = time.time()
@@ -97,6 +132,25 @@ class StartupHealthCheck(Node):
                 reasons.append(
                     f"激光雷达无有效 {self.args.lidar_topic} 点云。"
                     f"请检查雷达是否上电、网线、主机 IP、msop/difop 端口、雷达 IP。"
+                )
+
+        if self.args.check_ultrasonic:
+            if self.last_ultrasonic_time is None or now - self.last_ultrasonic_time > timeout:
+                reasons.append(
+                    f"超声波无有效 {self.args.ultrasonic_topic} 数据。"
+                    f"请检查 ultrasonic 节点是否启动、串口设备是否存在、传感器是否上电、波特率是否正确。"
+                )
+
+        if self.args.check_can:
+            if self.last_can_time is None or now - self.last_can_time > timeout:
+                reasons.append(
+                    f"CAN 状态无有效 {self.args.can_feedback_topic} 数据。"
+                    f"请检查 can_feedback_node 是否启动、can0 是否 up、VCU 是否上电、CAN 接线和终端电阻。"
+                )
+            elif not self.last_can_valid:
+                reasons.append(
+                    f"CAN 状态话题 {self.args.can_feedback_topic} 有发布，但左右电机 RPM/油门反馈均无效。"
+                    f"请检查 VCU 是否发送反馈帧，以及 CAN ID 是否与参数配置匹配。"
                 )
 
         return reasons
@@ -189,10 +243,14 @@ def main():
     parser.add_argument("--check-fix", action="store_true")
     parser.add_argument("--check-heading", action="store_true")
     parser.add_argument("--check-lidar", action="store_true")
+    parser.add_argument("--check-ultrasonic", action="store_true")
+    parser.add_argument("--check-can", action="store_true")
 
     parser.add_argument("--fix-topic", default="/fix")
     parser.add_argument("--heading-topic", default="/heading_deg")
     parser.add_argument("--lidar-topic", default="/rslidar_points")
+    parser.add_argument("--ultrasonic-topic", default="/ultrasonic_distances")
+    parser.add_argument("--can-feedback-topic", default="/stack_can/feedback")
 
     parser.add_argument("--startup-timeout", type=float, default=3.0)
     parser.add_argument("--runtime-timeout", type=float, default=2.0)

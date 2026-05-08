@@ -12,10 +12,14 @@ run_health_check() {
         --check-fix \
         --check-heading \
         --check-lidar \
+        --check-ultrasonic \
+        --check-can \
         --fix-topic /fix \
         --heading-topic /heading_deg \
         --lidar-topic /rslidar_points \
-        --startup-timeout "${STARTUP_HEALTH_TIMEOUT:-3.0}" \
+        --ultrasonic-topic /ultrasonic_distances \
+        --can-feedback-topic /stack_can/feedback \
+        --startup-timeout "${STARTUP_HEALTH_TIMEOUT:-5.0}" \
         --runtime-timeout "${RUNTIME_HEALTH_TIMEOUT:-2.0}"
 }
 
@@ -31,6 +35,6 @@ echo "[container] 基础节点仍在后台运行；日志："
 echo "  - $HEALTH_LOG"
 echo "  - /tmp/docker_startup.log"
 echo ""
-echo "[container] 修复 RTK/雷达/网络后，在当前容器里重新执行："
+echo "[container] 修复 RTK/航向/雷达/超声波/CAN 后，在当前容器里重新执行："
 echo "  $ROS_WS/script/start_demo_after_health_check.sh"
 exit 2

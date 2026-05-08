@@ -68,6 +68,22 @@ def generate_launch_description():
 
         Node(
             package='main',
+            executable='ultrasonic',
+            name='ultrasonic',
+            output='screen',
+            parameters=[{
+                'port': '/dev/ttyTHS0',
+                'baudrate': 9600,
+                'alpha': 0.3,
+                'near_threshold_m': 0.50,
+                'jump_reject_m': 1.0,
+                'enable_jump_reject': True,
+                'publish_rate_hz': 20.0,
+            }],
+        ),
+
+        Node(
+            package='main',
             executable='rtk_center_from_nmea',
             name='rtk_center_from_nmea',
             parameters=[{
