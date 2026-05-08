@@ -304,6 +304,7 @@ class TrajWaypointFollower(Node):
 
         # Drive state
         self.drive_state = self.DS_PAUSED
+        self.abort_req = False
 
         # Subscriptions
         self.create_subscription(NavSatFix, self.gps_topic, self.on_gps, qos_profile_sensor_data)
@@ -459,9 +460,11 @@ class TrajWaypointFollower(Node):
         v = int(msg.data)
         if v == 1:
             self.drive_state = self.DS_RUNNING
+            self.abort_req = False
             self.get_logger().info("Drive: RUNNING")
         elif v == 2:
             self.drive_state = self.DS_ESTOP
+            self.abort_req = True
             self.get_logger().warn("Drive: ESTOP")
         else:
             self.drive_state = self.DS_PAUSED
@@ -469,6 +472,7 @@ class TrajWaypointFollower(Node):
 
     def on_abort(self, msg: Bool):
         if bool(msg.data):
+            self.abort_req = True
             self.drive_state = self.DS_ESTOP
             self.get_logger().warn("Drive: ESTOP (via /abort True)")
 
@@ -592,6 +596,28 @@ class TrajWaypointFollower(Node):
 
         # 如果处于卸货模式，优先处理卸货计时
         if self.unload_mode:
+            # abort / ESTOP 打断卸货：
+            # 立即复位 unload，不调用 finish_unload，不标记卸货完成。
+            # 恢复后该卸货点仍未完成，会重新执行完整卸货流程。
+            if self.abort_req or self.drive_state == self.DS_ESTOP:
+                self.publish_traj_cmd(
+                    self.vcu_speed_stop_kmh, 0.0, 0.0,
+                    unload=False
+                )
+                self.unload_mode = False
+                self.unload_end_time = 0.0
+                self.unload_reset_end_time = 0.0
+                self.unload_target_idx = -1
+                self.waiting_for_task = False
+                self.spin_state = 'IDLE'
+                self.angle_sign = 0
+                self._pub_waiting(False)
+                self.get_logger().warn(
+                    "Abort during unload: unload reset, unload not marked finished"
+                )
+                self.publish_map_to_odom(self.cur_x, self.cur_y, self.cur_yaw)
+                return
+
             self.drive_state = self.DS_PAUSED
             self.waiting_for_task = False
 

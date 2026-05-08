@@ -108,18 +108,6 @@ docker run --runtime nvidia -it --rm \
         fi
       fi
 
-      SCRIPT_DIR="$ROS_WS/script"
-      if [ -n "$ROS_WS" ] && [ -f "$SCRIPT_DIR/csv_receive_all.py" ]; then
-        echo "[container] start csv_receive_all.py ..."
-        cd "$SCRIPT_DIR"
-        nohup python3 csv_receive_all.py > /tmp/csv_receive.log 2>&1 &
-        CSV_PID=$!
-        echo "[container] csv_receive_all.py 已启动 (PID: $CSV_PID)，日志: /tmp/csv_receive.log"
-        cd "$ROS_WS"  # 回到工作空间根目录
-      else
-        echo "[container] WARN: $SCRIPT_DIR/csv_receive_all.py 不存在，跳过启动"
-      fi
-
       START_DOCKER_STARTUP="${START_DOCKER_STARTUP:-true}"
       if [ "$START_DOCKER_STARTUP" = "true" ]; then
         echo "[container] start docker_startup.launch.py in background ..."

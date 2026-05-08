@@ -100,12 +100,15 @@ class BaleAlignController(Node):
         # --------------------------------------------------
         self.at_task_waiting = False
         self.drive_state = self.DS_PAUSED
+        self.abort_req = False
         self.current_target: Optional[BaleTarget] = None
         self.last_target_recv_time = None
 
         self.create_subscription(BaleTarget, '/bale_target', self.on_bale_target, 10)
         self.create_subscription(Bool, '/at_task_waiting', self.on_task_waiting, 10)
         self.create_subscription(UInt8, '/drive_cmd', self.on_drive_cmd, 1)
+        self.create_subscription(Bool, '/abort', self.on_abort, 1)
+        self.create_subscription(Bool, '/reset_estop', self.on_reset_estop, 1)
 
         # --------------------------------------------------
         # 发布
@@ -170,6 +173,17 @@ class BaleAlignController(Node):
 
     def on_drive_cmd(self, msg: UInt8):
         self.drive_state = int(msg.data)
+        if self.drive_state == self.DS_ESTOP:
+            self.abort_req = True
+
+    def on_abort(self, msg: Bool):
+        if bool(msg.data):
+            self.abort_req = True
+            self.drive_state = self.DS_ESTOP
+
+    def on_reset_estop(self, msg: Bool):
+        if bool(msg.data):
+            self.abort_req = False
 
     # --------------------------------------------------
     # 工具函数
@@ -221,6 +235,20 @@ class BaleAlignController(Node):
         cmd.pick_action = bool(pick_action)
         cmd.valid = bool(valid)
         return cmd
+
+    def publish_pick_reset_cmd(self, reason: str):
+        cmd = self.make_cmd(
+            speed_kmh=0.0,
+            angle_deg=0.0,
+            dist_m=0.0,
+            pick_action=False,
+            valid=True,
+        )
+        self.pub_bale_cmd.publish(cmd)
+        self.set_active(False)
+        self.get_logger().warn(
+            f'Abort bale sequence: {reason}; pick_action reset, /task_done not published'
+        )
 
     def update_aligned_state(self, angle_abs: float):
         """
@@ -314,14 +342,19 @@ class BaleAlignController(Node):
         now = self.now_s()
 
         # --------------------------------------
+        # 0) 安全打断：abort / ESTOP 立即复位 pick_action，不发布 /task_done
+        # --------------------------------------
+        if self.abort_req or self.drive_state == self.DS_ESTOP:
+            if self.active or self.pick_action_sent_time is not None:
+                self.publish_pick_reset_cmd('abort or ESTOP')
+            else:
+                self.set_active(False)
+            return
+
+        # --------------------------------------
         # 1) 已进入 pick_action 保持阶段
         # --------------------------------------
         if self.pick_action_sent_time is not None:
-            if self.drive_state == self.DS_ESTOP:
-                self.get_logger().warn('ESTOP during pick_action, abort bale sequence')
-                self.set_active(False)
-                return
-
             self.set_active(True)
 
             dist = 0.0
