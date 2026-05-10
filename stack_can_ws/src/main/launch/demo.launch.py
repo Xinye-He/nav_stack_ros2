@@ -61,6 +61,14 @@ def generate_launch_description():
 
         Node(
             package='main',
+            executable='motor_protection_node',
+            name='motor_protection_node',
+            output='screen',
+            parameters=[params_file],
+        ),
+
+        Node(
+            package='main',
             executable='dr_odometry_node',
             name='dr_odometry',
             parameters=[{

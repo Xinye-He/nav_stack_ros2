@@ -119,6 +119,30 @@ can_feedback_node:
     ground_speed_topic: "/ground_speed_mps"
     yaw_rate_topic: "/wheel_yaw_rate_rad_s"
 
+motor_protection_node:
+  ros__parameters:
+    feedback_topic: "/stack_can/feedback"
+    abort_topic: "/abort"
+
+    # 当油门电压持续高于该阈值时，认为车辆正在给电机输出动力。
+    # can_feedback_node 中 throttle_raw 按 raw * 5.0 / 255.0 换算为电压。
+    throttle_high_v: 0.8
+
+    # 当电机转速绝对值低于该阈值时，认为电机处于低速或堵转状态。
+    stall_rpm_threshold: 30.0
+
+    # “高油门 + 低转速” 持续超过该时间后触发 /abort。
+    # 原地旋转、田间阻力大时容易短时低速，因此不要设置得过小。
+    stall_timeout_s: 1.0
+
+    # 是否在反馈无效时直接触发 /abort。
+    # 初期建议保持 false，避免 CAN 反馈偶发丢帧导致误急停。
+    abort_on_feedback_invalid: false
+
+    protect_left_motor: true
+    protect_right_motor: true
+    latch_abort: true
+
 bale_align_controller:
   ros__parameters:
     angle_lpf_alpha: 0.25
