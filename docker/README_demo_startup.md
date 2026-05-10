@@ -30,7 +30,7 @@
 执行 start_demo_after_health_check.sh
         |
         v
-startup_health_check.py 检查关键传感器和 CAN 状态
+health_monitor.py 检查关键传感器和 CAN 状态
         |
         +-- 检查通过 --> 启动 ros2 launch main demo.launch.py
         |
@@ -93,7 +93,7 @@ ros2 launch main docker_startup.launch.py
 该脚本会调用：
 
 ```bash
-/root/stack_can_ws/script/startup_health_check.py
+/root/stack_can_ws/script/health_monitor.py
 ```
 
 当前健康检查项目包括：
@@ -204,7 +204,7 @@ DEMO_LAUNCH="ros2 launch main demo.launch.py some_arg:=value" ./docker/demo.sh
 查看健康检查日志：
 
 ```bash
-cat /tmp/startup_health_check.log
+cat /tmp/health_monitor_startup.log
 ```
 
 查看基础节点启动日志：
@@ -267,7 +267,7 @@ candump can0
 ## 10. 开发注意事项
 
 1. `docker_startup.launch.py` 只放基础硬件节点，不放完整业务逻辑。
-2. `startup_health_check.py` 只负责判断 demo 是否具备启动条件。
+2. `health_monitor.py` 只负责判断 demo 是否具备启动条件。
 3. `demo.launch.py` 是正式业务 demo 的入口。
 4. 新增关键传感器时，应同步加入：
    - 基础节点启动；

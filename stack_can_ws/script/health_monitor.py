@@ -16,7 +16,7 @@ from stack_msgs.msg import CanFeedback
 
 class StartupHealthCheck(Node):
     def __init__(self, args):
-        super().__init__("startup_health_check")
+        super().__init__("health_monitor")
 
         self.args = args
         self.start_time = time.time()
@@ -75,7 +75,7 @@ class StartupHealthCheck(Node):
 
         self.timer = self.create_timer(0.5, self.check_once)
 
-        self.get_logger().info("Startup health check started")
+        self.get_logger().info("Health monitor started")
         self.get_logger().info(f"check_fix={args.check_fix}, topic={args.fix_topic}")
         self.get_logger().info(f"check_heading={args.check_heading}, topic={args.heading_topic}")
         self.get_logger().info(f"check_lidar={args.check_lidar}, topic={args.lidar_topic}")
@@ -214,7 +214,7 @@ class StartupHealthCheck(Node):
                 2
             )
 
-        self.get_logger().info("Startup health check passed")
+        self.get_logger().info("Startup health check passed, switching to runtime monitor")
 
         if self.args.once:
             self.exit_with_status(

@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 NETWORKS_DIR="data/networks"
 DOCKER_ROOT="/root"     # where the project resides inside docker
 STACK_CAN_WS_DIR="${STACK_CAN_WS_DIR:-$REPO_ROOT/stack_can_ws}"
+DOCKER_WORKDIR="${DOCKER_WORKDIR:-/root/stack_can_ws}"
 
 # parse user arguments
 USER_COMMAND="$*"
@@ -50,6 +51,7 @@ print_var "DEV_VOLUME"
 print_var "USER_VOLUME"
 print_var "USER_COMMAND"
 print_var "STACK_CAN_WS_DIR"
+print_var "DOCKER_WORKDIR"
 print_var "V4L2_DEVICES"
 print_var "DISPLAY_DEVICE"
 
@@ -78,7 +80,7 @@ docker run --runtime nvidia -it --rm \
     --volume /dev:/dev \
     --device /dev \
     --group-add dialout \
-    -w "$DOCKER_ROOT" \
+    -w "$DOCKER_WORKDIR" \
     $DISPLAY_DEVICE $V4L2_DEVICES \
     $DATA_VOLUME $USER_VOLUME $DEV_VOLUME \
     "$CONTAINER_IMAGE" \
@@ -116,6 +118,9 @@ docker run --runtime nvidia -it --rm \
         echo "[container] docker_startup.launch.py 已启动 (PID: $STARTUP_PID)，日志: /tmp/docker_startup.log"
         sleep 1
       fi
+
+      # 进入 ROS 工作空间，确保后续命令和最终交互 shell 都停留在 /root/stack_can_ws。
+      cd "$ROS_WS" 2>/dev/null || cd /root/stack_can_ws 2>/dev/null || true
 
       # 默认流程：健康检查通过后启动 demo.launch.py；失败则保留容器 shell 便于复位后重试。
       if [ -z "$TGT_CMD" ]; then

@@ -22,6 +22,7 @@ NETWORKS_DIR="data/networks"
 DOCKER_ROOT="/root"	# where the project resides inside docker
 LIDAR_ROSBAG_DIR="${LIDAR_ROSBAG_DIR:-$REPO_PARENT/lidar_rosbag}"
 STACK_CAN_WS_DIR="${STACK_CAN_WS_DIR:-$REPO_ROOT/stack_can_ws}"
+DOCKER_WORKDIR="${DOCKER_WORKDIR:-/root/stack_can_ws}"
 
 # parse user arguments
 USER_COMMAND=""
@@ -65,6 +66,7 @@ print_var "USER_VOLUME"
 print_var "USER_COMMAND"
 print_var "LIDAR_ROSBAG_DIR"
 print_var "STACK_CAN_WS_DIR"
+print_var "DOCKER_WORKDIR"
 print_var "V4L2_DEVICES"
 print_var "DISPLAY_DEVICE"
 
@@ -85,7 +87,7 @@ docker run --runtime nvidia -it --rm \
 	--volume /dev:/dev \
 	--device /dev \
 	--group-add dialout \
-	-w $DOCKER_ROOT \
+	-w "$DOCKER_WORKDIR" \
 	$DISPLAY_DEVICE $V4L2_DEVICES \
 	$DATA_VOLUME $USER_VOLUME $DEV_VOLUME \
 	$CONTAINER_IMAGE $USER_COMMAND \

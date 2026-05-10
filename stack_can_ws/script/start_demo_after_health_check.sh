@@ -3,11 +3,11 @@ set -e
 set -o pipefail
 
 ROS_WS="${ROS_WS:-/root/stack_can_ws}"
-HEALTH_LOG="${HEALTH_LOG:-/tmp/startup_health_check.log}"
+HEALTH_LOG="${HEALTH_LOG:-/tmp/health_monitor_startup.log}"
 DEMO_LAUNCH="${DEMO_LAUNCH:-ros2 launch main demo.launch.py}"
 
 run_health_check() {
-    python3 "$ROS_WS/script/startup_health_check.py" \
+    python3 "$ROS_WS/script/health_monitor.py" \
         --once \
         --check-fix \
         --check-heading \

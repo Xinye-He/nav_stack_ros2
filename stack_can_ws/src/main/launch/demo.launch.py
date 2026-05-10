@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, EnvironmentVariable
 from launch_ros.actions import Node
@@ -26,6 +26,28 @@ def generate_launch_description():
             'enable_bale_pipeline',
             default_value='true',
             description='Launch bale detector + bale align controller'
+        ),
+
+        # ---------------- 运行期健康监控 ----------------
+        ExecuteProcess(
+            cmd=[
+                'python3',
+                '/root/stack_can_ws/script/health_monitor.py',
+                '--check-fix',
+                '--check-heading',
+                '--check-lidar',
+                '--check-ultrasonic',
+                '--check-can',
+                '--fix-topic', '/fix',
+                '--heading-topic', '/heading_deg',
+                '--lidar-topic', '/rslidar_points',
+                '--ultrasonic-topic', '/ultrasonic_distances',
+                '--can-feedback-topic', '/stack_can/feedback',
+                '--startup-timeout', '5.0',
+                '--runtime-timeout', '2.0',
+            ],
+            name='runtime_health_monitor',
+            output='screen',
         ),
 
         # ---------------- 基础定位 / 循迹链 ----------------
