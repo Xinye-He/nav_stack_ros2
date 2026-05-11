@@ -77,7 +77,7 @@ traj_waypoint_follower:
     strict_hold_deg: 2.0
 
     # 误差阈值
-    emergency_spin_hdg_deg: 35.0   # 比你原来 55° 更容易触发紧急 SPIN
+    emergency_spin_hdg_deg: 35.0   # 比原来 55° 更容易触发紧急 SPIN
     hdg_deadband_deg: 1.0
     cte_deadband_m: 0.1
     sign_hysteresis_deg: 1.0
