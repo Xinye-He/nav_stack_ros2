@@ -36,31 +36,31 @@ public:
   {
     // ===== 基本参数 =====
     min_range_ = this->declare_parameter<float>("min_range_m", 0.0f);
-    max_range_ = this->declare_parameter<float>("max_range_m", 20.0f);
+    max_range_ = this->declare_parameter<float>("max_range_m", 10.0f);
 
     // 固定外参：地面坐标系由安装参数直接给出
-    sensor_height_m_ = this->declare_parameter<float>("sensor_height_m", 1.85f);
+    sensor_height_m_ = this->declare_parameter<float>("sensor_height_m", 1.70f);
     mount_pitch_deg_ = this->declare_parameter<float>("mount_pitch_deg", -10.0f);
     mount_roll_deg_  = this->declare_parameter<float>("mount_roll_deg", 0.0f);
 
     // 高度带筛选：保留离地 [min_height, max_height] 的点
     min_height_m_ = this->declare_parameter<float>("min_height_m", 0.20f);
-    max_height_m_ = this->declare_parameter<float>("max_height_m", 1.00f);
+    max_height_m_ = this->declare_parameter<float>("max_height_m", 1.50f);
 
     // 2D聚类参数（在 ground 平面的 XY 上）
     cluster_tolerance_ = this->declare_parameter<float>("cluster_tolerance_m", 0.15f);
-    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 500);
-    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 2000);
+    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 200);
+    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 5000);
 
     // 草捆二维尺寸判据（地平面 PCA 包围盒）
     bale_min_long_  = this->declare_parameter<float>("bale_min_long_m", 0.80f);
     bale_max_long_  = this->declare_parameter<float>("bale_max_long_m", 2.20f);
     bale_min_short_ = this->declare_parameter<float>("bale_min_short_m", 0.40f);
-    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 1.50f);
+    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 2.0f);
 
     // 长宽比
     aspect_min_ = this->declare_parameter<float>("aspect_min", 1.0f);
-    aspect_max_ = this->declare_parameter<float>("aspect_max", 2.0f);
+    aspect_max_ = this->declare_parameter<float>("aspect_max", 10.0f);
 
     // 候选在 z 方向的厚度
     z_span_min_ = this->declare_parameter<float>("z_span_min_m", 0.40f);
