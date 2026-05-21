@@ -481,22 +481,6 @@ ros2 bag record \
 
 ---
 
-## About 建议
-
-GitHub About description 建议设置为：
-
-```text
-ROS2 + Docker software stack for a Jetson-based autonomous agricultural vehicle with RTK path following, LiDAR bale detection, CAN control, and safety monitoring.
-```
-
-Topics 建议设置：
-
-```text
-ros2, jetson, autonomous-vehicle, agriculture, lidar, rtk, socketcan, docker, robotics, point-cloud
-```
-
----
-
 ## 免责声明
 
 本项目面向实车农业无人车测试环境，涉及底盘控制、CAN 通信和急停逻辑。请在空旷、安全、可人工接管的环境中测试，确认急停链路和遥控接管有效后再进行自动作业。
