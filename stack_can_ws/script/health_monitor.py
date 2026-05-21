@@ -97,7 +97,10 @@ class StartupHealthCheck(Node):
         self.last_lidar_time = time.time()
 
     def ultrasonic_cb(self, msg: Float32MultiArray):
-        if len(msg.data) >= 4 and any(v > 0.0 for v in msg.data[:4]):
+        # 启动/运行期健康检查只判断超声波话题是否持续有 4 路数据到达。
+        # 允许 [0.0, 0.0, 0.0, 0.0]，因为 0 值可能代表无回波、初始化值或传感器协议占位。
+        # 障碍物远近判断交给 ultrasonic 节点自身和安全仲裁逻辑处理。
+        if len(msg.data) >= 4:
             self.last_ultrasonic_time = time.time()
 
     def can_feedback_cb(self, msg: CanFeedback):
@@ -252,7 +255,7 @@ def main():
     parser.add_argument("--ultrasonic-topic", default="/ultrasonic_distances")
     parser.add_argument("--can-feedback-topic", default="/stack_can/feedback")
 
-    parser.add_argument("--startup-timeout", type=float, default=3.0)
+    parser.add_argument("--startup-timeout", type=float, default=8.0)
     parser.add_argument("--runtime-timeout", type=float, default=2.0)
     parser.add_argument(
         "--once",
