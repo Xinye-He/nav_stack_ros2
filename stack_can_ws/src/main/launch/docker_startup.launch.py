@@ -91,7 +91,7 @@ def generate_launch_description():
                 'heading_topic': '/heading_deg',
                 'out_fix_center_topic': '/fix_center',
                 'out_vehicle_heading_topic': '/vehicle_heading_deg',
-                'main_to_center_x': -1.35,
+                'main_to_center_x': -1.80,
                 'main_to_center_y': -0.75,
                 'main_to_center_z': 0.0,
                 'heading_from_north_cw': True,
