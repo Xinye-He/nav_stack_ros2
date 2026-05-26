@@ -2,10 +2,6 @@
 
 本仓库是一个基于 **ROS2 + Docker + Jetson Orin NX** 的农业无人车软件工程，面向农田草捆捡拾场景，支持 RTK 路径跟踪、激光雷达草捆检测、草捆末端对准、VCU/CAN 底盘控制、超声波状态检测、电子围栏、电机堵转保护和启动/运行期健康检查。
 
-当前分支：`codex/docker-demo-health-startup`
-
-> 这不是一个只放算法 demo 的仓库。它更接近一套实车软件栈：传感器输入、控制命令裁决、CAN 输出、安全保护、Docker 部署和现场排障都在这里。农田现场不会因为代码写得优雅就少长一棵草，所以工程闭环比单个算法更重要。
-
 ---
 
 ## 项目目标
@@ -56,7 +52,7 @@
 | 计算平台 | NVIDIA Jetson Orin NX |
 | RTK/GNSS | 维特智能 WTRTK-982 |
 | 激光雷达 | RoboSense E1R |
-| 超声波 | 电应普科技一拖四超声波测距模块 |
+| 超声波 | 一拖四超声波测距模块 |
 | 底盘控制 | VCU，通过 SocketCAN 通信 |
 | CAN 协议 | 与 VCU 供应商协商拟定 |
 | 软件框架 | ROS2 + Docker |
@@ -217,13 +213,6 @@ health_monitor / motor_protection_node / geofence_monitor / teleop
 ```bash
 git clone --recursive https://github.com/Xinye-He/nav_stack_ros2.git
 cd nav_stack_ros2
-git checkout codex/docker-demo-health-startup
-```
-
-如果克隆时忘记 `--recursive`：
-
-```bash
-git submodule update --init --recursive
 ```
 
 ### 2. 启动 Docker demo
@@ -246,6 +235,7 @@ cd ~/nav_stack_ros2
 9. 命令结束后保留容器 shell，便于查看日志和排障。
 
 ### 3. 手动启动基础节点
+当启动前健康检查失败，即外设未正常运行时，需要手动运行基础节点脚本
 
 ```bash
 ros2 launch main docker_startup.launch.py
@@ -404,7 +394,7 @@ ros2 bag play <bag_dir> --topics /rslidar_points
 记录点云：
 
 ```bash
-ros2 bag record /rslidar_points -o yuanqu
+ros2 bag record /rslidar_points -o <filename>
 ```
 
 记录完整调试数据：
