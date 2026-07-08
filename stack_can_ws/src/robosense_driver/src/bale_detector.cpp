@@ -44,32 +44,32 @@ public:
     mount_roll_deg_  = this->declare_parameter<float>("mount_roll_deg", 0.0f);
 
     // 高度带筛选：保留离地 [min_height, max_height] 的点
-    min_height_m_ = this->declare_parameter<float>("min_height_m", 0.20f);
+    min_height_m_ = this->declare_parameter<float>("min_height_m", 0.10f);
     max_height_m_ = this->declare_parameter<float>("max_height_m", 1.50f);
 
     // 2D聚类参数（在 ground 平面的 XY 上）
-    cluster_tolerance_ = this->declare_parameter<float>("cluster_tolerance_m", 0.15f);
-    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 200);
-    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 5000);
+    cluster_tolerance_ = this->declare_parameter<float>("cluster_tolerance_m", 0.08f);
+    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 500);
+    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 1000);
 
     // 草捆二维尺寸判据（地平面 PCA 包围盒）
-    bale_min_long_  = this->declare_parameter<float>("bale_min_long_m", 0.80f);
-    bale_max_long_  = this->declare_parameter<float>("bale_max_long_m", 2.20f);
+    bale_min_long_  = this->declare_parameter<float>("bale_min_long_m", 0.50f);
+    bale_max_long_  = this->declare_parameter<float>("bale_max_long_m", 2.0f);
     bale_min_short_ = this->declare_parameter<float>("bale_min_short_m", 0.40f);
-    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 2.0f);
+    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 1.5f);
 
     // 长宽比
     aspect_min_ = this->declare_parameter<float>("aspect_min", 1.0f);
-    aspect_max_ = this->declare_parameter<float>("aspect_max", 10.0f);
+    aspect_max_ = this->declare_parameter<float>("aspect_max", 5.0f);
 
     // 候选在 z 方向的厚度
-    z_span_min_ = this->declare_parameter<float>("z_span_min_m", 0.40f);
-    z_span_max_ = this->declare_parameter<float>("z_span_max_m", 1.0f);
+    z_span_min_ = this->declare_parameter<float>("z_span_min_m", 0.2f);
+    z_span_max_ = this->declare_parameter<float>("z_span_max_m", 0.5f);
 
     // 一个简单的二维占据率，用于剔除特别稀疏/细碎的簇
     occupancy_grid_res_m_ = this->declare_parameter<float>("occupancy_grid_res_m", 0.08f);
     fill_ratio_min_       = this->declare_parameter<float>("fill_ratio_min", 0.18f);
-    log_detection_results_ = this->declare_parameter<bool>("log_detection_results", false);
+    log_detection_results_ = this->declare_parameter<bool>("log_detection_results", true);
 
     sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_points",
@@ -329,18 +329,47 @@ private:
     const float fill_ratio = estimateFillRatio(local_pts, major_min, major_max, minor_min, minor_max);
 
     if (len_major < bale_min_long_ || len_major > bale_max_long_) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "reject cluster: len_major=%.2f not in [%.2f, %.2f], len_minor=%.2f, aspect=%.2f, z_span=%.2f, fill=%.2f",
+        len_major, bale_min_long_, bale_max_long_,
+        len_minor, aspect, z_span, fill_ratio);
       return out;
     }
+
     if (len_minor < bale_min_short_ || len_minor > bale_max_short_) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "reject cluster: len_minor=%.2f not in [%.2f, %.2f], len_major=%.2f, aspect=%.2f, z_span=%.2f, fill=%.2f",
+        len_minor, bale_min_short_, bale_max_short_,
+        len_major, aspect, z_span, fill_ratio);
       return out;
     }
+
     if (aspect < aspect_min_ || aspect > aspect_max_) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "reject cluster: aspect=%.2f not in [%.2f, %.2f], size=(%.2f, %.2f), z_span=%.2f, fill=%.2f",
+        aspect, aspect_min_, aspect_max_,
+        len_major, len_minor, z_span, fill_ratio);
       return out;
     }
+
     if (z_span < z_span_min_ || z_span > z_span_max_) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "reject cluster: z_span=%.2f not in [%.2f, %.2f], size=(%.2f, %.2f), aspect=%.2f, fill=%.2f",
+        z_span, z_span_min_, z_span_max_,
+        len_major, len_minor, aspect, fill_ratio);
       return out;
     }
+
     if (fill_ratio < fill_ratio_min_) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "reject cluster: fill_ratio=%.2f < %.2f, size=(%.2f, %.2f), aspect=%.2f, z_span=%.2f",
+        fill_ratio, fill_ratio_min_,
+        len_major, len_minor, aspect, z_span);
       return out;
     }
 
