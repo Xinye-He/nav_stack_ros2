@@ -53,14 +53,6 @@ def generate_launch_description():
         # ---------------- 基础定位 / 循迹链 ----------------
         Node(
             package='main',
-            executable='can_feedback_node',
-            name='can_feedback_node',
-            output='screen',
-            parameters=[params_file],
-        ),
-
-        Node(
-            package='main',
             executable='motor_protection_node',
             name='motor_protection_node',
             output='screen',

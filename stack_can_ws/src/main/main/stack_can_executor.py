@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import time
+from main.paused_reset import rejection
+import json
 import math
 import struct
 
@@ -6,7 +9,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
-from std_msgs.msg import UInt8, Bool
+from std_msgs.msg import UInt8, Bool, String
 from stack_msgs.msg import StackCommand, StackCanStatus
 from builtin_interfaces.msg import Time
 
@@ -67,6 +70,8 @@ class StackCanExecutor(Node):
         # 最新命令缓存
         self.cmd_traj   = None  # StackCommand
         self.cmd_teleop = None
+        self.teleop_source = "unknown"
+        self.last_send_error = ""
         self.cmd_bale   = None
 
         # 状态
@@ -95,11 +100,21 @@ class StackCanExecutor(Node):
         self.create_subscription(StackCommand, '/stack_cmd/bale',
                                  self._on_bale_cmd, qos)
 
+        self.create_subscription(StackCommand, "/stack_cmd/websocket", self._on_websocket_cmd, qos)
+
         # 订阅状态
         self.create_subscription(UInt8, '/drive_cmd', self._on_drive_cmd, 1)
         self.create_subscription(Bool, '/remote_req', lambda m: setattr(self, 'remote_req', bool(m.data)), 1)
         self.create_subscription(Bool, '/teleop_active', lambda m: setattr(self, 'teleop_active', bool(m.data)), 1)
         self.create_subscription(Bool, '/bale_active', lambda m: setattr(self, 'bale_active', bool(m.data)), 1)
+
+        self.paused_reset_guards = {}
+        for topic, name in (('/geofence_ok', '围栏'), ('/network_link_ok', '9010链路'),
+                            ('/safety/reset_peripherals_ready', '外设及控制节点')):
+            self.create_subscription(Bool, topic,
+                lambda msg, label=name: self.paused_reset_guards.update({label: (bool(msg.data), time.monotonic())}), 10)
+        self.pub_paused_reset_result = self.create_publisher(String, '/vehicle/reset_result', 10)
+        self.create_subscription(String, '/reset_estop_paused', self._on_paused_reset, 10)
 
         # 安全输入
         self.create_subscription(Bool, '/abort', self._on_abort, 1)
@@ -108,6 +123,8 @@ class StackCanExecutor(Node):
         # 定时器：20Hz 输出 CAN
         self.create_timer(0.05, self.loop)
         self.pub_can_status = self.create_publisher(StackCanStatus, '/stack_can/status', 10)
+        self.pub_execution_status = self.create_publisher(String, "/vehicle/execution_status", 10)
+        self.create_timer(0.5, self.publish_execution_status)
 
         self.get_logger().info("StackCanExecutor initialized")
 
@@ -116,6 +133,11 @@ class StackCanExecutor(Node):
 
     def _on_teleop_cmd(self, msg: StackCommand):
         self.cmd_teleop = msg
+        self.teleop_source = "keyboard"
+
+    def _on_websocket_cmd(self, msg):
+        self.cmd_teleop = msg
+        self.teleop_source = "websocket_9010"
 
     def _on_bale_cmd(self, msg: StackCommand):
         self.cmd_bale = msg
@@ -137,6 +159,37 @@ class StackCanExecutor(Node):
     def _on_reset_estop(self, msg: Bool):
         if bool(msg.data):
             self.reset_estop_req = True
+
+    def _on_paused_reset(self, msg):
+        try:
+            request = json.loads(msg.data)
+            request_id = request['request_id']
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+                return
+        except (ValueError, KeyError, TypeError):
+            return
+        reason = rejection({
+            'remote_req': self.remote_req, 'abort_req': self.abort_req,
+            'estop_reason': self.estop_reason,
+            'guards': [(name,) + self.paused_reset_guards.get(name, (False, None))
+                       for name in ('围栏', '9010链路', '外设及控制节点')],
+        }, time.monotonic())
+        if not reason:
+            # One callback replaces the command and latch atomically. Never RUN.
+            self.cmd_teleop = self._make_stop_command()
+            self.teleop_source = 'websocket_9010'
+            self.teleop_active = True
+            self.reset_estop_req = False
+            self.abort_req = False
+            self.estop_latched = False
+            self.estop_reason = ''
+            self.drive_state = self.DS_PAUSED
+            self.safety_state = 'READY'
+            self.control_mode = 'TELEOP'
+        result = {'type': 'reset_estop_result', 'request_id': request_id,
+                  'ok': not bool(reason), 'message': reason or '急停已解除，保持PAUSE、零速零转向',
+                  'drive_state': self.drive_state, 'estop': self.estop_latched}
+        self.pub_paused_reset_result.publish(String(data=json.dumps(result, ensure_ascii=False)))
 
     def _make_stop_command(self) -> StackCommand:
         msg = StackCommand()
@@ -235,6 +288,16 @@ class StackCanExecutor(Node):
         if s != self._last_state_log:
             self.get_logger().info(s)
             self._last_state_log = s
+
+    def publish_execution_status(self):
+        payload = {
+            'safety_state': self.safety_state, 'control_mode': self.control_mode,
+            'drive_state': self.drive_state, 'command_source': self.teleop_source,
+            'estop_reason': self.estop_reason,
+            'can_available': bool(self.enable_can and self.can_bus),
+            'last_send_error': self.last_send_error,
+        }
+        self.pub_execution_status.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
     def loop(self):
         # 没有 CAN 或总线不可用
@@ -404,9 +467,9 @@ class StackCanExecutor(Node):
                               data=payload,
                               is_extended_id=self.can_extended)
             self.can_bus.send(msg, timeout=0.001)
-        except Exception:
-            # 发送失败这边不抛异常，避免频繁崩溃
-            pass
+            self.last_send_error = ""
+        except Exception as exc:
+            self.last_send_error = str(exc)
 
 
 def main(args=None):

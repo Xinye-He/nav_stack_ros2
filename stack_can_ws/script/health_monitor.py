@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import math
+from status_model import peripheral_status
+from status_store import read, update
+
 import argparse
 import os
 import signal
@@ -16,10 +20,10 @@ from stack_msgs.msg import CanFeedback
 
 class StartupHealthCheck(Node):
     def __init__(self, args):
-        super().__init__("health_monitor")
+        super().__init__(getattr(args, "node_name", "health_monitor"))
 
         self.args = args
-        self.start_time = time.time()
+        self.start_time = time.monotonic()
 
         self.last_fix_time = None
         self.last_heading_time = None
@@ -27,6 +31,7 @@ class StartupHealthCheck(Node):
         self.last_ultrasonic_time = None
         self.last_can_time = None
         self.last_can_valid = False
+        self.invalid_data = {}
 
         qos_sensor = QoSProfile(
             depth=10,
@@ -86,79 +91,60 @@ class StartupHealthCheck(Node):
         )
 
     def fix_cb(self, msg: NavSatFix):
-        # NavSatStatus.STATUS_NO_FIX == -1
-        if msg.status.status >= 0:
-            self.last_fix_time = time.time()
+        valid = (msg.status.status >= 0 and math.isfinite(msg.latitude)
+                 and math.isfinite(msg.longitude) and -90 <= msg.latitude <= 90
+                 and -180 <= msg.longitude <= 180)
+        self.invalid_data['fix'] = '' if valid else '无定位或经纬度无效'
+        if valid:
+            self.last_fix_time = time.monotonic()
 
     def heading_cb(self, msg: Float32):
-        self.last_heading_time = time.time()
+        valid = math.isfinite(msg.data)
+        self.invalid_data['heading'] = '' if valid else '航向不是有限数值'
+        if valid:
+            self.last_heading_time = time.monotonic()
 
     def lidar_cb(self, msg: PointCloud2):
-        self.last_lidar_time = time.time()
+        valid = msg.width * msg.height > 0 and bool(msg.data)
+        self.invalid_data['lidar'] = '' if valid else '点云为空'
+        if valid:
+            self.last_lidar_time = time.monotonic()
 
     def ultrasonic_cb(self, msg: Float32MultiArray):
-        # 启动/运行期健康检查只判断超声波话题是否持续有 4 路数据到达。
-        # 允许 [0.0, 0.0, 0.0, 0.0]，因为 0 值可能代表无回波、初始化值或传感器协议占位。
-        # 障碍物远近判断交给 ultrasonic 节点自身和安全仲裁逻辑处理。
-        if len(msg.data) >= 4:
-            self.last_ultrasonic_time = time.time()
+        valid = len(msg.data) >= 4 and all(math.isfinite(v) for v in msg.data[:4])
+        self.invalid_data['ultrasonic'] = '' if valid else '不足四路或包含非有限数值'
+        if valid:
+            self.last_ultrasonic_time = time.monotonic()
 
     def can_feedback_cb(self, msg: CanFeedback):
-        self.last_can_time = time.time()
-        self.last_can_valid = (
-            msg.rpm_left_valid or
-            msg.rpm_right_valid or
-            msg.throttle_left_valid or
-            msg.throttle_right_valid
-        )
+        self.last_can_time = time.monotonic()
+        self.last_can_valid = (msg.rpm_left_valid or msg.rpm_right_valid
+                               or msg.throttle_left_valid or msg.throttle_right_valid)
+        self.invalid_data['can'] = '' if self.last_can_valid else '电机 RPM 和油门反馈均无效'
+
+    def peripheral_status(self, timeout, starting=False):
+        checks = {}
+        if self.args.check_fix or self.args.check_heading:
+            checks['rtk'] = []
+            if self.args.check_fix:
+                checks['rtk'].append(('RTK_FIX', 'RTK 定位', self.last_fix_time, self.invalid_data.get('fix')))
+            if self.args.check_heading:
+                checks['rtk'].append(('RTK_HEADING', 'RTK 航向', self.last_heading_time, self.invalid_data.get('heading')))
+        for key, enabled, label, last in (
+            ('lidar', self.args.check_lidar, '激光雷达点云', self.last_lidar_time),
+            ('ultrasonic', self.args.check_ultrasonic, '超声波', self.last_ultrasonic_time),
+            ('can', self.args.check_can, 'CAN/VCU', self.last_can_time),
+        ):
+            if enabled:
+                checks[key] = [(key.upper(), label, last, self.invalid_data.get(key))]
+        return peripheral_status(checks, time.monotonic(), timeout, starting)
 
     def missing_reasons(self, timeout):
-        now = time.time()
-        reasons = []
-
-        if self.args.check_fix:
-            if self.last_fix_time is None or now - self.last_fix_time > timeout:
-                reasons.append(
-                    f"RTK/GPS 无有效 {self.args.fix_topic} 数据。"
-                    f"请检查 RTK 是否上电、天线、串口、NMEA GGA/RMC 输出。"
-                )
-
-        if self.args.check_heading:
-            if self.last_heading_time is None or now - self.last_heading_time > timeout:
-                reasons.append(
-                    f"RTK 航向角无有效 {self.args.heading_topic} 数据。"
-                    f"请检查 THS/HDT 输出、双天线定向、RTK 配置。"
-                )
-
-        if self.args.check_lidar:
-            if self.last_lidar_time is None or now - self.last_lidar_time > timeout:
-                reasons.append(
-                    f"激光雷达无有效 {self.args.lidar_topic} 点云。"
-                    f"请检查雷达是否上电、网线、主机 IP、msop/difop 端口、雷达 IP。"
-                )
-
-        if self.args.check_ultrasonic:
-            if self.last_ultrasonic_time is None or now - self.last_ultrasonic_time > timeout:
-                reasons.append(
-                    f"超声波无有效 {self.args.ultrasonic_topic} 数据。"
-                    f"请检查 ultrasonic 节点是否启动、串口设备是否存在、传感器是否上电、波特率是否正确。"
-                )
-
-        if self.args.check_can:
-            if self.last_can_time is None or now - self.last_can_time > timeout:
-                reasons.append(
-                    f"CAN 状态无有效 {self.args.can_feedback_topic} 数据。"
-                    f"请检查 can_feedback_node 是否启动、can0 是否 up、VCU 是否上电、CAN 接线和终端电阻。"
-                )
-            elif not self.last_can_valid:
-                reasons.append(
-                    f"CAN 状态话题 {self.args.can_feedback_topic} 有发布，但左右电机 RPM/油门反馈均无效。"
-                    f"请检查 VCU 是否发送反馈帧，以及 CAN ID 是否与参数配置匹配。"
-                )
-
-        return reasons
+        return [error['message'] for item in self.peripheral_status(timeout).values()
+                for error in item['errors']]
 
     def shutdown_launch(self, title, reasons, exit_code):
+        update("runtime_fault" if exit_code == 3 or read().get("ever_ready") else "startup_failed", "；".join(reasons))
         self.get_logger().error("")
         self.get_logger().error(title)
         for reason in reasons:
@@ -183,6 +169,8 @@ class StartupHealthCheck(Node):
         os._exit(exit_code)
 
     def exit_with_status(self, title, reasons, exit_code):
+        if exit_code:
+            update("startup_failed", "；".join(reasons))
         if reasons:
             self.get_logger().error("")
             self.get_logger().error(title)
@@ -196,7 +184,7 @@ class StartupHealthCheck(Node):
         os._exit(exit_code)
 
     def check_once(self):
-        elapsed = time.time() - self.start_time
+        elapsed = time.monotonic() - self.start_time
 
         if elapsed < self.args.startup_timeout:
             return

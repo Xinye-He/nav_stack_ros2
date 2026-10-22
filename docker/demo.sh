@@ -57,10 +57,22 @@ print_var "DISPLAY_DEVICE"
 
 cat /proc/device-tree/model > /tmp/nv_jetson_model
 
+# Camera scripts must run on the host, not inside the navigation container.
+if ! bash "$STACK_CAN_WS_DIR/script/video_usb/ensure_camera_service.sh"; then
+    echo "[camera] 相机远控不可用，导航仍可启动；相机指令将返回具体错误。" >&2
+fi
+
+# systemd has no interactive terminal. Keep the usual manual launch unchanged.
+DEMO_NONINTERACTIVE="${DEMO_NONINTERACTIVE:-0}"
+DOCKER_TERMINAL_ARGS=(-it)
+if [ "$DEMO_NONINTERACTIVE" = "1" ]; then
+    DOCKER_TERMINAL_ARGS=()
+fi
+
 # 避免容器名冲突
 docker rm -f nav_stack_ros2 >/dev/null 2>&1 || true
 
-docker run --runtime nvidia -it --rm \
+docker run --runtime nvidia "${DOCKER_TERMINAL_ARGS[@]}" --rm \
     --privileged \
     --name nav_stack_ros2 \
     --network host \
@@ -68,6 +80,7 @@ docker run --runtime nvidia -it --rm \
     -e ROS_WS="${ROS_WS:-$DOCKER_ROOT/stack_can_ws}" \
     -e TGT_CMD="${USER_COMMAND:-}" \
     -e START_DOCKER_STARTUP \
+    -e DEMO_NONINTERACTIVE="$DEMO_NONINTERACTIVE" \
     -e RMW_IMPLEMENTATION \
     -e ROS_DOMAIN_ID \
     -v /tmp/argus_socket:/tmp/argus_socket \
@@ -110,6 +123,23 @@ docker run --runtime nvidia -it --rm \
         fi
       fi
 
+      export NAV_STATUS_FILE="/tmp/nav_device_status.json"
+      python3 "$ROS_WS/script/status_store.py" starting "正在启动外设" --reset
+      rm -f "$NAV_STATUS_FILE.ready"
+      nohup python3 "$ROS_WS/script/status_service.py" > /tmp/device_status.log 2>&1 &
+      STATUS_PID=$!
+      for attempt in {1..50}; do
+        if [ -f "$NAV_STATUS_FILE.ready" ]; then break; fi
+        if ! kill -0 "$STATUS_PID" 2>/dev/null; then break; fi
+        sleep 0.1
+      done
+      if [ ! -f "$NAV_STATUS_FILE.ready" ] || ! kill -0 "$STATUS_PID" 2>/dev/null; then
+        echo "[container] 状态服务启动失败，请查看 /tmp/device_status.log"
+        cat /tmp/device_status.log
+        if [ "${DEMO_NONINTERACTIVE:-0}" = "1" ]; then exit 1; fi
+        exec bash
+      fi
+
       START_DOCKER_STARTUP="${START_DOCKER_STARTUP:-true}"
       if [ "$START_DOCKER_STARTUP" = "true" ]; then
         echo "[container] start docker_startup.launch.py in background ..."
@@ -132,6 +162,12 @@ docker run --runtime nvidia -it --rm \
       CMD_STATUS=$?
       if [ "$CMD_STATUS" -ne 0 ]; then
         echo "[container] command exited with status $CMD_STATUS"
+      fi
+      if [ "${DEMO_NONINTERACTIVE:-0}" = "1" ]; then
+        # Retain telemetry after startup/runtime failure, without restarting motion.
+        echo "[container] 后台模式：保留状态服务；修复故障后手动重新启动控制程序。"
+        wait "$STATUS_PID"
+        exit 1
       fi
       # 命令结束后留在交互 shell，便于看日志/排障
       exec bash

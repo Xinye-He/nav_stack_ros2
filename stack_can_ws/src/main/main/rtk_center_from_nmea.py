@@ -68,7 +68,7 @@ class RtkCenterFromNmea(Node):
 
         # main antenna -> vehicle center (meters) expressed in base_link frame (x forward, y left)
         self.declare_parameter('main_to_center_x', -1.80)
-        self.declare_parameter('main_to_center_y', -0.75)
+        self.declare_parameter('main_to_center_y', -0.65)
         self.declare_parameter('main_to_center_z', 0.0)
 
         # heading interpretation/calibration

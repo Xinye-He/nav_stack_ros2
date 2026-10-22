@@ -1,0 +1,27 @@
+[Unit]
+Description=Jetson navigation stack and device status service
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service
+RequiresMountsFor=/home/xinye30/nav_stack_ros2
+
+[Service]
+Type=simple
+User=xinye30
+SupplementaryGroups=docker video dialout render
+WorkingDirectory=/home/xinye30/nav_stack_ros2
+Environment=DEMO_NONINTERACTIVE=1
+Environment=ROS_DISTRO=humble
+Environment=ROS_WS=/root/stack_can_ws
+Environment=START_DOCKER_STARTUP=true
+ExecStart=/bin/bash /home/xinye30/nav_stack_ros2/docker/demo.sh
+ExecStop=-/usr/bin/docker stop --time 20 nav_stack_ros2
+TimeoutStartSec=0
+TimeoutStopSec=35
+Restart=no
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

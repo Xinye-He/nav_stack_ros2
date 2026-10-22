@@ -4,8 +4,11 @@
 # 1. 订阅 ROS 2 /fix，通过 ws://IP:9001 广播 GPS 数据
 # 2. 接收 ws://IP:9002/fence 和 ws://IP:9002/points 上传的 CSV，保存为 fence.csv / points.csv
 # 3. 订阅 ROS 2 /heading_deg，通过 ws://IP:9003 广播航向角数据
+# 4. ws://IP:9010 复用 websocket_teleop_key 的远控和断联保护
 
 import asyncio
+import importlib.util
+from contextlib import AsyncExitStack
 import csv
 import io
 import json
@@ -21,7 +24,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import Float32
 
-import websockets
+from websockets.legacy.server import serve
 from websockets.exceptions import ConnectionClosed
 
 
@@ -34,6 +37,7 @@ HOST = "0.0.0.0"
 GPS_WS_PORT = 9001
 CSV_WS_PORT = 9002
 HEADING_WS_PORT = 9003
+TELEOP_WS_PORT = 9010
 
 GPS_TOPIC = "/fix"
 HEADING_TOPIC = "/heading_deg"
@@ -309,75 +313,75 @@ async def csv_ws_handler(websocket, path=None):
 # ROS spin
 # =========================
 
-async def ros_spin(node: VehicleDataWebSocketNode):
+def load_teleop_bridge():
+    # Load the workspace source, avoiding a stale installed copy.
+    source = pathlib.Path(__file__).resolve().parents[1] / "src/main/main/websocket_teleop_key.py"
+    spec = importlib.util.spec_from_file_location("server_all_teleop", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class RemoteOnlyBridge(module.WebSocketTeleopBridge):
+        def enable_raw(self):
+            # This service runs in the background; do not capture terminal input.
+            return False
+
+    return RemoteOnlyBridge
+
+
+async def ros_spin(*nodes):
     while rclpy.ok():
-        rclpy.spin_once(node, timeout_sec=0.01)
+        for node in nodes:
+            rclpy.spin_once(node, timeout_sec=0.0)
         await asyncio.sleep(ROS_SPIN_PERIOD)
 
 
-# =========================
-# main
-# =========================
-
 async def main():
+    bridge_class = load_teleop_bridge()
     rclpy.init()
-    node = VehicleDataWebSocketNode()
-
-    gps_ws_handler.node = node
-    heading_ws_handler.node = node
-
-    gps_server = await websockets.serve(
-        gps_ws_handler,
-        HOST,
-        GPS_WS_PORT,
-        ping_interval=PING_INTERVAL,
-        ping_timeout=PING_TIMEOUT,
-    )
-
-    csv_server = await websockets.serve(
-        csv_ws_handler,
-        HOST,
-        CSV_WS_PORT,
-        ping_interval=20,
-        ping_timeout=10,
-    )
-
-    heading_server = await websockets.serve(
-        heading_ws_handler,
-        HOST,
-        HEADING_WS_PORT,
-        ping_interval=PING_INTERVAL,
-        ping_timeout=PING_TIMEOUT,
-    )
-
-    logger.info(f"GPS WebSocket server listening on ws://{HOST}:{GPS_WS_PORT}")
-    logger.info(f"CSV WebSocket server listening on ws://{HOST}:{CSV_WS_PORT}/fence and /points")
-    logger.info(f"Heading WebSocket server listening on ws://{HOST}:{HEADING_WS_PORT}")
-    logger.info(f"CSV files will be saved to: {SAVE_DIR}")
-
+    node = None
+    bridge = None
+    tasks = []
     try:
-        await asyncio.gather(
-            ros_spin(node),
-            broadcast_gps(node),
-            broadcast_heading(node),
-            gps_server.wait_closed(),
-            csv_server.wait_closed(),
-            heading_server.wait_closed(),
-        )
+        # Bind every port before constructing the control node, which publishes
+        # initial control state. A port conflict must fail before publication.
+        async def teleop_handler(websocket, path=None):
+            await bridge.handle_client(websocket, path)
 
+        async with AsyncExitStack() as servers:
+            for handler, port in (
+                (gps_ws_handler, GPS_WS_PORT),
+                (csv_ws_handler, CSV_WS_PORT),
+                (heading_ws_handler, HEADING_WS_PORT),
+                (teleop_handler, TELEOP_WS_PORT),
+            ):
+                await servers.enter_async_context(serve(
+                    handler, HOST, port,
+                    ping_interval=20 if port in (CSV_WS_PORT, TELEOP_WS_PORT) else PING_INTERVAL,
+                    ping_timeout=10 if port in (CSV_WS_PORT, TELEOP_WS_PORT) else PING_TIMEOUT,
+                ))
+            node = VehicleDataWebSocketNode()
+            bridge = bridge_class()
+            gps_ws_handler.node = node
+            heading_ws_handler.node = node
+            logger.info("WebSocket services listening on %s: GPS=%s CSV=%s heading=%s teleop=%s",
+                        HOST, GPS_WS_PORT, CSV_WS_PORT, HEADING_WS_PORT, TELEOP_WS_PORT)
+            logger.info("Teleop uses websocket_teleop_key JSON commands; send messages within %.2fs",
+                        bridge.link_timeout_sec)
+            tasks = [asyncio.create_task(coro) for coro in (
+                ros_spin(node, bridge), broadcast_gps(node), broadcast_heading(node)
+            )]
+            try:
+                await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        logger.info("Shutting down servers...")
-
-        gps_server.close()
-        csv_server.close()
-        heading_server.close()
-
-        await gps_server.wait_closed()
-        await csv_server.wait_closed()
-        await heading_server.wait_closed()
-
-        node.destroy_node()
-
+        if bridge is not None:
+            bridge.disable_raw()
+            bridge.destroy_node()
+        if node is not None:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 

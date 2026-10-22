@@ -1,0 +1,13 @@
+logLevel: info
+
+rtsp: yes
+rtspAddress: :8554
+
+paths:
+  cam0:
+    source: publisher
+    overridePublisher: yes
+  cam1:
+    source: publisher
+    overridePublisher: yes
+

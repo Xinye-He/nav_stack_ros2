@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import uuid
 import json
 import time
 import sys
@@ -13,6 +14,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, UInt8, String
 from stack_msgs.msg import StackCommand
 import websockets
+from main.camera_control import CameraControlClient
 
 HELP = """
 websocket_teleop_bridge: WebSocket teleop + mode control
@@ -57,12 +59,18 @@ DEBOUNCE_SEC = 0.15
 class WebSocketTeleopBridge(Node):
     def __init__(self):
         super().__init__('websocket_teleop_bridge')
+        self.camera_control = CameraControlClient()
+        self.paused_reset_pending = {}
+        self.pub_paused_reset = self.create_publisher(String, '/reset_estop_paused', 10)
+        self.create_subscription(String, '/vehicle/reset_result', self._on_paused_reset_result, 10)
 
         # 发布者
         self.pub_drive_cmd = self.create_publisher(UInt8, '/drive_cmd', 1)
         self.pub_task_done = self.create_publisher(Bool, '/task_done', 1)
         self.pub_teleop_act = self.create_publisher(Bool, '/teleop_active', 1)
-        self.pub_teleop_cmd = self.create_publisher(StackCommand, '/stack_cmd/teleop', 1)
+        self.pub_teleop_cmd = self.create_publisher(StackCommand, '/stack_cmd/websocket', 1)
+        self.pub_local_cmd = self.create_publisher(StackCommand, '/stack_cmd/teleop', 1)
+        self.input_source = 'websocket'
         self.pub_reset_estop = self.create_publisher(Bool, '/reset_estop', 1)
         self.pub_abort = self.create_publisher(Bool, '/abort', 1)
         self.pub_link_ok = self.create_publisher(Bool, '/network_link_ok', 1)
@@ -119,6 +127,45 @@ class WebSocketTeleopBridge(Node):
         self.publish_teleop_active()
         self.publish_teleop_cmd()
 
+    def _on_paused_reset_result(self, msg):
+        try:
+            result = json.loads(msg.data)
+            if not isinstance(result, dict):
+                return
+            future = self.paused_reset_pending.get(result.get('request_id'))
+            if future is not None and not future.done():
+                future.set_result(result)
+        except (ValueError, TypeError):
+            pass
+
+    async def request_paused_reset(self, websocket, data):
+        request_id = data.get('request_id', str(uuid.uuid4()))
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+            return
+        if self.paused_reset_pending:
+            await websocket.send(json.dumps({'type': 'reset_estop_result', 'request_id': request_id,
+                'ok': False, 'message': '另一复位请求进行中'}, ensure_ascii=False))
+            return
+        future = asyncio.get_running_loop().create_future()
+        self.paused_reset_pending[request_id] = future
+        try:
+            self.pub_paused_reset.publish(String(data=json.dumps({'request_id': request_id})))
+            result = await asyncio.wait_for(future, 3.0)
+            if result.get('ok'):
+                self.zero_teleop()
+                self.drive_state = 0
+                self.teleop_active = True
+                self.network_fault_latched = False
+        except asyncio.TimeoutError:
+            result = {'type': 'reset_estop_result', 'request_id': request_id,
+                      'ok': False, 'message': '执行节点未回复，不能确认已复位'}
+        finally:
+            self.paused_reset_pending.pop(request_id, None)
+        try:
+            await websocket.send(json.dumps(result, ensure_ascii=False))
+        except Exception:
+            pass
+
     # ---------------- 终端 raw mode ----------------
     def enable_raw(self):
         if not self.has_tty:
@@ -161,11 +208,9 @@ class WebSocketTeleopBridge(Node):
 
     #发布链路状态
     def publish_link_ok(self, ok: bool):
-        if self.last_link_ok_pub is ok:
-            return
         self.pub_link_ok.publish(Bool(data=bool(ok)))
         self.last_link_ok_pub = ok
-        self.get_logger().info(f'/network_link_ok -> {ok}')
+
 
     #发布故障文本
     def publish_fault_text(self, text: str):
@@ -215,6 +260,7 @@ class WebSocketTeleopBridge(Node):
     #看门狗链路
     def link_watchdog_loop(self):
         now = time.monotonic()
+        self.publish_link_ok(self.ws_connected)
 
         # 没客户端连接，且之前不是故障状态时，不一定要强制 abort；
         # 但如果你希望“远程模式下必须有链路”，这里可以直接判故障。
@@ -266,7 +312,7 @@ class WebSocketTeleopBridge(Node):
         msg.dump = bool(self.dump)
         msg.pick_action = bool(self.pick_action)
         msg.valid = True
-        self.pub_teleop_cmd.publish(msg)
+        (self.pub_local_cmd if self.input_source == "keyboard" else self.pub_teleop_cmd).publish(msg)
         self.get_logger().info(
             "TELEOP CMD: "
             f"speed={self.pre_speed_kmh} km/h, angle={self.angle_deg} deg, "
@@ -417,6 +463,17 @@ class WebSocketTeleopBridge(Node):
                     self.get_logger().warn(f"Invalid JSON from {client_addr}: {message}")
                     continue
 
+                if not isinstance(data, dict):
+                    continue
+                if data.get('type') == 'reset_estop_paused':
+                    asyncio.create_task(self.request_paused_reset(websocket, data))
+                    continue
+                if data.get('type') == 'camera':
+                    await self.camera_control.submit(websocket, data)
+                    continue
+                if data.get('type') == 'heartbeat':
+                    continue
+
                 if 'key' in data:
                     key = str(data['key'])[:1]
                     self.handle_key(key)
@@ -493,6 +550,10 @@ class WebSocketTeleopBridge(Node):
             self.get_logger().error(f"Unexpected error: {e}")
             self.trigger_network_abort(f'websocket exception: {e}')
 
+        finally:
+            self.ws_connected = False
+            self.trigger_network_abort(f'websocket closed: {client_addr}')
+
     # ---------------- 本地键盘监听 ----------------
     async def keyboard_loop(self):
         if not self.has_tty or not self.raw_mode:
@@ -504,7 +565,11 @@ class WebSocketTeleopBridge(Node):
                 if dr:
                     c = os.read(self.fd, 1).decode(errors='ignore')
                     if c:
-                        self.handle_key(c)
+                        self.input_source = "keyboard"
+                        try:
+                            self.handle_key(c)
+                        finally:
+                            self.input_source = "websocket"
             except Exception as e:
                 self.get_logger().warn(f'keyboard_loop error: {e}')
                 await asyncio.sleep(0.1)

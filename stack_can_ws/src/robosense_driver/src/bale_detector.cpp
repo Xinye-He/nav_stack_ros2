@@ -44,27 +44,27 @@ public:
     mount_roll_deg_  = this->declare_parameter<float>("mount_roll_deg", 0.0f);
 
     // 高度带筛选：保留离地 [min_height, max_height] 的点
-    min_height_m_ = this->declare_parameter<float>("min_height_m", 0.10f);
+    min_height_m_ = this->declare_parameter<float>("min_height_m", 0.20f);
     max_height_m_ = this->declare_parameter<float>("max_height_m", 1.50f);
 
     // 2D聚类参数（在 ground 平面的 XY 上）
     cluster_tolerance_ = this->declare_parameter<float>("cluster_tolerance_m", 0.08f);
-    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 500);
-    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 1000);
+    cluster_min_size_  = this->declare_parameter<int>("cluster_min_size", 300);
+    cluster_max_size_  = this->declare_parameter<int>("cluster_max_size", 10000);
 
     // 草捆二维尺寸判据（地平面 PCA 包围盒）
-    bale_min_long_  = this->declare_parameter<float>("bale_min_long_m", 0.50f);
-    bale_max_long_  = this->declare_parameter<float>("bale_max_long_m", 2.0f);
-    bale_min_short_ = this->declare_parameter<float>("bale_min_short_m", 0.40f);
-    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 1.5f);
+    bale_min_long_  = this->declare_parameter<float>("bale_min_long_m", 0.20f);
+    bale_max_long_  = this->declare_parameter<float>("bale_max_long_m", 1.60f);
+    bale_min_short_ = this->declare_parameter<float>("bale_min_short_m", 0.10f);
+    bale_max_short_ = this->declare_parameter<float>("bale_max_short_m", 1.50f);
 
     // 长宽比
     aspect_min_ = this->declare_parameter<float>("aspect_min", 1.0f);
     aspect_max_ = this->declare_parameter<float>("aspect_max", 5.0f);
 
     // 候选在 z 方向的厚度
-    z_span_min_ = this->declare_parameter<float>("z_span_min_m", 0.2f);
-    z_span_max_ = this->declare_parameter<float>("z_span_max_m", 0.5f);
+    z_span_min_ = this->declare_parameter<float>("z_span_min_m", 0.25f);
+    z_span_max_ = this->declare_parameter<float>("z_span_max_m", 1.50f);
 
     // 一个简单的二维占据率，用于剔除特别稀疏/细碎的簇
     occupancy_grid_res_m_ = this->declare_parameter<float>("occupancy_grid_res_m", 0.08f);
