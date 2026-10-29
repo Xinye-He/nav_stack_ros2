@@ -59,6 +59,19 @@ class StatusTests(unittest.TestCase):
         self.node.check_once()
         self.assertEqual(self.node.snapshot['device_state'], 'ready')
 
+    def test_diagnostic_source_in_json_without_changing_health(self):
+        self.ready()
+        self.node.on_log(Obj(name='motor_protection_node',msg='MOTOR PROTECTION ABORT: left motor stalled',level=40,stamp=Obj(sec=10,nanosec=0)))
+        self.node.check_once()
+        packet=self.node.packet()
+        event=packet['diagnostics']['events'][-1]
+        self.assertEqual(event['source'],'motor_protection_node')
+        self.assertEqual(event['evidence'],'trigger_report')
+        self.assertIn('left motor stalled',event['message'])
+        self.assertEqual(packet['device_state'],'ready')
+        self.assertTrue(packet['execution_status']['fresh'])
+        json.dumps(packet,allow_nan=False)
+
     def test_waiting_peripherals_and_startup_failure(self):
         self.node.check_once()
         self.assertEqual(self.node.snapshot['peripherals']['lidar']['state'], 'starting')

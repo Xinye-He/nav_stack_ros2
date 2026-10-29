@@ -215,7 +215,7 @@ async def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--socket', default=str(BASE / '.runtime/control.sock'))
-    parser.add_argument('--public-host', default='10.244.241.213')
+    parser.add_argument('--public-host', default='10.144.144.1')
     try:
         asyncio.run(run(parser.parse_args()))
     except KeyboardInterrupt:

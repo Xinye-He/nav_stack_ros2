@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 import math
 import csv
 from typing import List, Tuple
@@ -15,6 +16,7 @@ from nav_msgs.msg import Path
 
 import tf2_ros
 
+from main.trajectory_control import FollowerPathControl
 from stack_msgs.msg import StackCommand   # 自定义消息
 
 
@@ -367,6 +369,7 @@ class TrajWaypointFollower(Node):
         self.create_timer(0.05, self.control_loop)  # 20 Hz
 
         self.last_pre_kmh_sent = 0.0
+        self.path_control = FollowerPathControl(self, LLA2ENU, heading_csv_deg_to_enu_rad)
 
         self.get_logger().info(
             f"Loaded {len(self.waypoints_xy)} waypoints. GPS:{self.gps_topic}, RTK:{self.rtk_heading_topic}"
@@ -557,6 +560,7 @@ class TrajWaypointFollower(Node):
         x, y, _ = self.geo.lla_to_enu(msg.latitude, msg.longitude, alt)
         self.cur_x = x
         self.cur_y = y
+        self.path_control.position_received = time.monotonic()
         if self.dead_reckon:
             if self.dr_x is None:
                 self.dr_x, self.dr_y = x, y
@@ -574,6 +578,7 @@ class TrajWaypointFollower(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
         self.cur_yaw = wrap_pi(yaw + self.yaw_offset)
+        self.path_control.heading_received = time.monotonic()
 
     def on_rtk_heading(self, msg: Float32):
         hdg = float(msg.data)
@@ -581,6 +586,7 @@ class TrajWaypointFollower(Node):
             return
         yaw_enu = heading_csv_deg_to_enu_rad(hdg)
         self.cur_yaw = wrap_pi(yaw_enu + self.yaw_offset)
+        self.path_control.heading_received = time.monotonic()
 
     # ---- 主控制循环：计算 /stack_cmd/traj ----
     def control_loop(self):

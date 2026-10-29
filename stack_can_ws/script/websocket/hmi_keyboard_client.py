@@ -23,6 +23,7 @@ HELP = """
   w/4 前进4km/h    8 前进8km/h      s/1 后退4km/h    0 速度归零
   a/d 左右10°     q/e 左右20°      c/空格 速度和转角归零
   j 倾倒           k 捡拾           l 卸载           h 捡拾动作
+  n 重载路径并进入零速遥控（随后按t启动循迹）
   f 任务完成       v 开启相机       b 关闭相机       p 查询相机
   ? 查看帮助       Esc/Ctrl+C 退出
 速度为持续设定值，松开按键不会自动停车。普通车辆命令无成功回执，请结合9011状态判断。
@@ -36,6 +37,7 @@ def emit(label, value):
 
 class KeyboardCommands:
     def __init__(self, work_only=False):
+        self.path_version = None
         self.work_only = work_only
         self.reset()
 
@@ -55,9 +57,16 @@ class KeyboardCommands:
             if key in ('c', ' '):
                 self.reset()
                 return dict(type='cmd', **self.command)
+        if key == 'n':
+            self.reset()
+            self.path_version = None
+            return {'type': 'trajectory', 'action': 'reload', 'request_id': 'reload-' + uuid.uuid4().hex}
+        if key == 't':
+            self.reset()
+            return {'type': 'trajectory', 'action': 'toggle', 'request_id': 'toggle-' + uuid.uuid4().hex}
         simple = {'m': {'type': 'active', 'value': True},
                   'u': {'type': 'active', 'value': False},
-                  't': {'key': 't'}, 'g': {'type': 'drive', 'state': 1},
+                  'g': {'type': 'drive', 'state': 1},
                   'z': {'type': 'drive', 'state': 0}, 'x': {'type': 'drive', 'state': 2},
                   'r': {'type': 'reset_estop'}, 'f': {'type': 'task_done'}}
         if key in simple:
@@ -241,6 +250,8 @@ async def run(args):
                     async for raw in ws:
                         try: value = json.loads(raw)
                         except ValueError: value = raw
+                        if isinstance(value, dict) and value.get('type') == 'trajectory_result' and value.get('action') == 'reload':
+                            commands.path_version = value.get('path_version') if value.get('ok') else None
                         emit('[9010回复]', value)
                     raise RuntimeError('9010 控制连接已断开；不会自动重连或重发运动指令。')
                 controls = [asyncio.create_task(keyboard(queue, commands, send)),
@@ -262,7 +273,7 @@ async def run(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog=WORK_HELP + "\n完整控制仅在 --full-control 下启用：\n" + HELP)
-    parser.add_argument('--host', default='10.244.241.213')
+    parser.add_argument('--host', default='10.144.144.1')
     parser.add_argument('--control-port', type=int, default=9010)
     parser.add_argument('--status-port', type=int, default=9011)
     parser.add_argument('--csv-port', type=int, default=9002)

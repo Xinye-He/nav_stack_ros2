@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import json
 import csv
 from typing import List, Tuple, Optional
 
@@ -8,7 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
 from sensor_msgs.msg import NavSatFix
-from std_msgs.msg import Bool, UInt8
+from std_msgs.msg import Bool, UInt8, String
 
 
 def wrap_pi(a: float) -> float:
@@ -183,6 +184,7 @@ class GeofenceMonitor(Node):
         qos_latched.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
 
         # 发布状态
+        self.pub_detail = self.create_publisher(String, '/geofence/status', qos_latched)
         self.pub_state = self.create_publisher(UInt8, '/geofence_state', qos_latched)
         self.pub_ok    = self.create_publisher(Bool,  '/geofence_ok',    qos_latched)
 
@@ -254,10 +256,10 @@ class GeofenceMonitor(Node):
 
         if dmin < self.warn_margin_m:
             # 临近边界
-            self.set_state(self.STATE_WARN, ok=False, reason=f"near boundary, dmin={dmin:.2f}m")
+            self.set_state(self.STATE_WARN, ok=False, reason=f"near boundary, dmin={dmin:.2f}m", distance_m=dmin)
         else:
             # 安全区
-            self.set_state(self.STATE_INSIDE, ok=True, reason=f"inside, dmin={dmin:.2f}m")
+            self.set_state(self.STATE_INSIDE, ok=True, reason=f"inside, dmin={dmin:.2f}m", distance_m=dmin)
 
     def compute_min_distance_to_edges(self,
                                       px: float,
@@ -275,10 +277,20 @@ class GeofenceMonitor(Node):
                 dmin = d
         return dmin
 
-    def set_state(self, state: int, ok: bool, reason: str = ""):
+    def set_state(self, state: int, ok: bool, reason: str = "", distance_m=None):
         # 发布状态（latched）
         self.pub_state.publish(UInt8(data=int(state)))
         self.pub_ok.publish(Bool(data=bool(ok)))
+
+        # Read-only detail snapshot, refreshed with the existing Bool guard.
+        code = ('INSIDE' if state == self.STATE_INSIDE else
+                'NEAR_BOUNDARY' if state == self.STATE_WARN else
+                'POSITION_UNKNOWN' if reason == 'no GPS position yet' else 'OUTSIDE')
+        distance = float(distance_m) if distance_m is not None and math.isfinite(distance_m) else None
+        self.pub_detail.publish(String(data=json.dumps(dict(
+            type='geofence_status', code=code, ok=bool(ok), reason=reason,
+            distance_to_boundary_m=distance, required_margin_m=float(self.warn_margin_m),
+            gps_topic=self.gps_topic), ensure_ascii=False, allow_nan=False)))
 
         # 状态变化时打 log 并在从 inside/warn -> outside 时触发 /abort
         if self.last_state is None or self.last_state != state:

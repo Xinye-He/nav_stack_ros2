@@ -17,6 +17,7 @@ from websockets.legacy.server import serve
 from obstacle_warning import summarize
 from health_monitor import StartupHealthCheck
 from status_model import vehicle_state
+from status_diagnostics import DiagnosticEvents
 from status_store import read, update
 
 
@@ -37,6 +38,7 @@ class StatusService(StartupHealthCheck):
         self.link_ok = False
         self.link_time = None
         self.driver_errors = {}
+        self.diagnostics = DiagnosticEvents()
         self.ready_nodes = set()
         self.seq = 0
         super().__init__(args)
@@ -67,6 +69,7 @@ class StatusService(StartupHealthCheck):
         self.link_time = time.monotonic()
 
     def on_log(self, msg):
+        self.diagnostics.record(msg)
         if msg.level < 40:
             return
         component = {'nmea_bridge': 'rtk', 'rsview': 'lidar',
@@ -128,11 +131,14 @@ class StatusService(StartupHealthCheck):
                        and all(p['state'] == 'ready' for p in peripherals.values()))
             self.reset_guard_pub.publish(Bool(data=bool(allowed)))
         state = lifecycle['device_state']
+        self.diagnostics.set_boot(lifecycle['boot_id'])
         self.snapshot = {'type': 'device_status', 'version': 1,
             'boot_id': lifecycle['boot_id'], 'device_state': state,
             'device_message': lifecycle.get('device_message', ''),
             'vehicle_state': vehicle_state(self.control, self.link_ok and self.link_time is not None and now - self.link_time < 1.5) if state == 'ready' and control_fresh else None,
             'peripherals': peripherals,
+            'diagnostics': self.diagnostics.snapshot(),
+            'execution_status': dict(self.control, fresh=control_fresh),
             'obstacle_warning': summarize(self.obstacle_ranges, self.obstacle_received, now,
                                           self.args.runtime_timeout, self.obstacle_threshold,
                                           self.obstacle_warning_threshold)}

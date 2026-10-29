@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import time
+from main.trajectory_control import ExecutorPathControl
 from main.paused_reset import rejection
 import json
 import math
@@ -120,6 +121,8 @@ class StackCanExecutor(Node):
         self.create_subscription(Bool, '/abort', self._on_abort, 1)
         self.create_subscription(Bool, '/reset_estop', self._on_reset_estop, 1)
 
+        self.path_control = ExecutorPathControl(self)
+
         # 定时器：20Hz 输出 CAN
         self.create_timer(0.05, self.loop)
         self.pub_can_status = self.create_publisher(StackCanStatus, '/stack_can/status', 10)
@@ -130,6 +133,7 @@ class StackCanExecutor(Node):
 
     def _on_traj_cmd(self, msg: StackCommand):
         self.cmd_traj = msg
+        self.path_control.traj_received = time.monotonic()
 
     def _on_teleop_cmd(self, msg: StackCommand):
         self.cmd_teleop = msg
@@ -143,6 +147,8 @@ class StackCanExecutor(Node):
         self.cmd_bale = msg
 
     def _on_drive_cmd(self, msg: UInt8):
+        if self.path_control.pending and int(msg.data) == self.DS_RUNNING:
+            return
         self.drive_state = int(msg.data)
         if self.drive_state == self.DS_ESTOP:
             self.estop_latched = True
@@ -216,6 +222,9 @@ class StackCanExecutor(Node):
         )
 
     def _try_clear_estop(self):
+        if getattr(self, "path_control", None) is not None and self.path_control.pending:
+            self.reset_estop_req = False
+            return
         if not self.reset_estop_req:
             return
 
@@ -300,6 +309,8 @@ class StackCanExecutor(Node):
         self.pub_execution_status.publish(String(data=json.dumps(payload, ensure_ascii=False)))
 
     def loop(self):
+        if getattr(self, "path_control", None) is not None and self.path_control.pending:
+            self.path_control.pause()
         # 没有 CAN 或总线不可用
         if not (self.enable_can and self.can_bus):
             return

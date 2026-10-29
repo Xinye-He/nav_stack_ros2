@@ -14,6 +14,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, UInt8, String
 from stack_msgs.msg import StackCommand
 import websockets
+from main.trajectory_control import BridgePathClient
 from main.camera_control import CameraControlClient
 
 HELP = """
@@ -60,6 +61,7 @@ class WebSocketTeleopBridge(Node):
     def __init__(self):
         super().__init__('websocket_teleop_bridge')
         self.camera_control = CameraControlClient()
+        self.trajectory_control = BridgePathClient(self)
         self.paused_reset_pending = {}
         self.pub_paused_reset = self.create_publisher(String, '/reset_estop_paused', 10)
         self.create_subscription(String, '/vehicle/reset_result', self._on_paused_reset_result, 10)
@@ -465,6 +467,9 @@ class WebSocketTeleopBridge(Node):
 
                 if not isinstance(data, dict):
                     continue
+                if data.get('type') == 'trajectory':
+                    asyncio.create_task(self.trajectory_control.request(websocket, data))
+                    continue
                 if data.get('type') == 'reset_estop_paused':
                     asyncio.create_task(self.request_paused_reset(websocket, data))
                     continue
@@ -474,6 +479,9 @@ class WebSocketTeleopBridge(Node):
                 if data.get('type') == 'heartbeat':
                     continue
 
+                if data.get('key') == 't':
+                    asyncio.create_task(self.trajectory_control.request(websocket, dict(data, action='toggle')))
+                    continue
                 if 'key' in data:
                     key = str(data['key'])[:1]
                     self.handle_key(key)

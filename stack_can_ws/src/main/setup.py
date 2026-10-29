@@ -25,6 +25,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
+            'device_status_viewer = main.device_status_viewer:main',
             'traj_waypoint_follower = main.traj_waypoint_follower:main',
             'stack_can_executor     = main.stack_can_executor:main',
             'teleop_key             = main.teleop_key:main',

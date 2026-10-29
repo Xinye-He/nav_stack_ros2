@@ -4,7 +4,7 @@
 
 ```bash
 python3 -m pip install websockets
-python3 hmi_keyboard_client.py --host 10.244.241.213
+python3 hmi_keyboard_client.py --host 10.144.144.1
 ```
 
 在 Jetson 本机运行可使用 `--host 127.0.0.1`。请只保留一个9010控制客户端。
@@ -42,7 +42,7 @@ PAUSE下VCU是否执行作业需实车协议确认；先在 `/stack_can/status` 
 ## 仅查看状态，不接入远控
 
 ```bash
-python3 hmi_keyboard_client.py --host 10.244.241.213 --status-only
+python3 hmi_keyboard_client.py --host 10.144.144.1 --status-only
 ```
 
 只连接9011；连续3秒没有状态会显示断线，随后重连。Ctrl+C退出。
@@ -61,8 +61,8 @@ python3 hmi_keyboard_client.py --full-control --dry-run --keys "mgwacxp"
 ## 模拟上传CSV
 
 ```bash
-python3 hmi_keyboard_client.py --host 10.244.241.213 --upload-fence /path/fence.csv
-python3 hmi_keyboard_client.py --host 10.244.241.213 --upload-points /path/points.csv
+python3 hmi_keyboard_client.py --host 10.144.144.1 --upload-fence /path/fence.csv
+python3 hmi_keyboard_client.py --host 10.144.144.1 --upload-points /path/points.csv
 ```
 
 这两种模式只连接9002并等待保存回执，不连接9010。
@@ -86,3 +86,8 @@ python3 hmi_keyboard_client.py --host 10.244.241.213 --upload-points /path/point
 9011设备总状态保留历史运行故障，不会因这条复位回执自动清除；检查回执和实时CAN的estop/drive字段。
 
 此次修改需要重启通信、状态和CAN执行节点后生效；正在运行的旧进程不会热更新。
+
+## 独立重载与启动
+
+完整模式新增n重载路径（保持暂停），收到trajectory_result重载成功后，y发送独立启动请求并携带path_version。
+默认work-only模式屏蔽两键。n不再模拟旧teleop_key.py的自动RUN行为。详见docs/TRAJECTORY_CONTROL_PROTOCOL.md。

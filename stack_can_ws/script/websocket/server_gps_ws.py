@@ -98,7 +98,7 @@ async def main():
     )
 
     logger.info(f"WebSocket server started on ws://0.0.0.0:{port}")
-    logger.info(f"Remote clients connect to: ws://10.244.241.213:{port}")
+    logger.info(f"Remote clients connect to: ws://10.144.144.1:{port}")
 
     try:
         # 并发运行 ROS 和 WebSocket
