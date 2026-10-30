@@ -89,7 +89,7 @@ def generate_launch_description():
             parameters=[{
                 'fix_topic': '/fix',
                 'heading_topic': '/heading_deg',
-                'out_fix_center_topic': '/fix_center',
+                'out_fix_center_topic': '/fix_center_raw',
                 'out_vehicle_heading_topic': '/vehicle_heading_deg',
                 'main_to_center_x': -1.80,
                 'main_to_center_y': -0.75,
@@ -102,6 +102,9 @@ def generate_launch_description():
             }],
             output='screen'
         ),
+
+        ExecuteProcess(cmd=['python3', '/root/stack_can_ws/script/rtk_drift.py'],
+                       name='rtk_drift', output='screen'),
 
         Node(
             package='robosense_driver',

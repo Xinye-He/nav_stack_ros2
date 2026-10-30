@@ -66,6 +66,10 @@ class WebSocketTeleopBridge(Node):
         self.can_control = CanControlClient(self)
         self.device_control = DeviceControlClient(self,self.can_control)
         self.trajectory_control = BridgePathClient(self)
+        self.rtk_pending = False
+        self.rtk_results = {}
+        self.pub_rtk = self.create_publisher(String, '/rtk_drift/calibrate', 10)
+        self.create_subscription(String, '/rtk_drift/result', self.on_rtk_result, 10)
         self.paused_reset_pending = {}
         self.sessions = ControlSessions()
         self.network_warning_latched = False
@@ -487,6 +491,37 @@ class WebSocketTeleopBridge(Node):
         self.get_logger().warn(f"Unknown key: {c}")
 
     # ---------------- WebSocket 处理 ----------------
+    def on_rtk_result(self, msg):
+        value = json.loads(msg.data)
+        self.rtk_results[value['request_id']] = value
+
+    async def calibrate_rtk(self, websocket, data):
+        if data.get('action') not in ('origin', 'drift'):
+            await websocket.send(json.dumps(dict(type='rtk_drift_result', ok=False, message='必须指定origin或drift操作'), ensure_ascii=False))
+            return
+        if self.rtk_pending:
+            await websocket.send(json.dumps(dict(type='rtk_drift_result', ok=False, message='标定进行中')))
+            return
+        self.rtk_pending = True
+        request_id = data.get('request_id') or uuid.uuid4().hex
+        try:
+            self.zero_teleop()
+            self.publish_teleop_cmd()
+            self.drive_state = 0
+            self.publish_drive_cmd()
+            await websocket.send(json.dumps(dict(type='rtk_drift_result', request_id=request_id,
+                ok=True, message='已暂停；请确认车辆停稳并保持在参考点，开始采样'), ensure_ascii=False))
+            await asyncio.sleep(2.0)
+            self.pub_rtk.publish(String(data=json.dumps(dict(request_id=request_id, action=data['action']))))
+            deadline = time.monotonic()+32
+            while request_id not in self.rtk_results and time.monotonic()<deadline:
+                await asyncio.sleep(0.1)
+            result = self.rtk_results.pop(request_id, dict(type='rtk_drift_result', ok=False,
+                request_id=request_id, message='标定超时，请检查补偿节点'))
+            await websocket.send(json.dumps(result, ensure_ascii=False))
+        finally:
+            self.rtk_pending = False
+
     async def handle_client(self, websocket, path):
         client_addr = websocket.remote_address
         self.get_logger().info(f"Client connected from {client_addr}")
@@ -517,6 +552,12 @@ class WebSocketTeleopBridge(Node):
                     continue
                 if self.can_control.pending and data.get('type') != 'heartbeat' and not (data.get('type') == 'drive' and data.get('state') == 2) and data.get('key') != 'x':
                     await websocket.send(json.dumps(dict(type='device_result' if self.device_control.pending else 'can_result', ok=False, code='DEVICE_BUSY' if self.device_control.pending else 'CAN_BUSY', message='导航维护期间仅接受查询、心跳和急停'), ensure_ascii=False))
+                    continue
+                if self.rtk_pending and data.get('type') != 'heartbeat' and not (data.get('type') == 'drive' and data.get('state') == 2):
+                    await websocket.send(json.dumps(dict(type='rtk_drift_result', ok=False, message='标定期间仅接受心跳和急停'), ensure_ascii=False))
+                    continue
+                if data.get('type') == 'rtk_drift':
+                    asyncio.create_task(self.calibrate_rtk(websocket, data))
                     continue
                 if data.get('type') == 'trajectory':
                     asyncio.create_task(self.trajectory_control.request(websocket, data))

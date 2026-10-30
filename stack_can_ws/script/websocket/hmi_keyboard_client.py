@@ -31,6 +31,7 @@ HELP = """
   j 倾倒           k 捡拾           l 卸载           h 捡拾动作
   n 重载路径并选择循迹（成功后按g开始循迹）
   f 任务完成       v 开启相机       b 关闭相机       p 查询相机
+  5 原点标定并覆盖（清零补偿）  y 计算漂移（须回到原点），均静止采样5秒
   ? 查看帮助       Esc/Ctrl+C 退出
 速度为持续设定值，松开按键不会自动停车。普通车辆命令无成功回执，请结合9011状态判断。
 退出控制连接会触发Jetson已有断联保护。心跳每0.5秒发送，包括等待相机执行期间。
@@ -92,6 +93,9 @@ class KeyboardCommands:
             if key in ('c', ' '):
                 self.reset()
                 return dict(type='cmd', **self.command)
+        if key in ('5', 'y'):
+            self.reset()
+            return dict(type='rtk_drift', action='origin' if key == '5' else 'drift', request_id='rtk-'+uuid.uuid4().hex)
         if key == 'n':
             self.reset()
             self.path_version = None
