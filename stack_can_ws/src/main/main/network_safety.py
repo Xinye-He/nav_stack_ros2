@@ -50,7 +50,7 @@ def fault_action(node):
     if teleop and node.teleop_source == 'keyboard':
         return 'warning', '本地键盘控制，网络断链仅告警'
     if teleop and node.teleop_source == 'websocket_9010':
-        return 'estop', '9010遥控网络断链，车辆已急停，重连后需手动复位'
+        return 'neutral', '9010遥控网络断链，车辆进入Neutral；连接恢复后恢复遥控，旧运动指令已清零'
     if node.drive_state == node.DS_PAUSED:
         return 'warning', '车辆已暂停，网络断链仅告警'
     return 'estop', '控制状态未明确确认为循迹，按断链急停处理'
@@ -59,6 +59,8 @@ def fault_action(node):
 class ExecutorNetworkSafety:
     def __init__(self, node):
         self.node = node
+        self.neutral = False
+        self.resume_running = False
         self.active = False
         self.fault_id = None
         self.cache = OrderedDict()
@@ -69,7 +71,12 @@ class ExecutorNetworkSafety:
         try:
             event = json.loads(msg.data)
             rid = event['request_id']
-            if not isinstance(rid, str) or not 1 <= len(rid) <= 128 or event.get('action') != 'fault':
+            if not isinstance(rid, str) or not 1 <= len(rid) <= 128:
+                return
+            if event.get('action') == 'restored':
+                self.restore()
+                return
+            if event.get('action') != 'fault':
                 return
             reason = event['reason_code']
             if reason not in NETWORK_REASONS:
@@ -84,6 +91,13 @@ class ExecutorNetworkSafety:
             action, message = 'estop', '网络急停仍在锁存，重连后需手动复位'
         else:
             action, message = fault_action(node)
+        if action == 'neutral':
+            if not self.neutral:
+                self.resume_running = node.drive_state == node.DS_RUNNING
+            self.neutral = True
+            node.cmd_teleop = node._make_stop_command()
+            node.drive_state = node.DS_PAUSED
+            node.bale_active = False
         if action == 'estop':
             if not self.active:
                 self.fault_id = rid
@@ -103,3 +117,19 @@ class ExecutorNetworkSafety:
         while len(self.cache) > 50:
             self.cache.popitem(last=False)
         self.pub.publish(String(data=json.dumps(result, ensure_ascii=False)))
+
+
+    def restore(self):
+        if not self.neutral:
+            return
+        node = self.node
+        self.neutral = False
+        if (node.estop_latched or node.abort_req or self.active or node.remote_req
+                or node.drive_state == node.DS_ESTOP or node.can_maintenance.active
+                or node.path_control.pending):
+            self.resume_running = False
+            return
+        if node.teleop_active and node.teleop_source == 'websocket_9010':
+            node.cmd_teleop = node._make_stop_command()
+            node.drive_state = node.DS_RUNNING if self.resume_running else node.DS_PAUSED
+        self.resume_running = False

@@ -72,6 +72,7 @@ class WebSocketTeleopBridge(Node):
         self.create_subscription(String, '/rtk_drift/result', self.on_rtk_result, 10)
         self.paused_reset_pending = {}
         self.sessions = ControlSessions()
+        self.network_neutral = False
         self.network_warning_latched = False
         self.network_event_pending = None
         self.pub_network_event = self.create_publisher(String, '/safety/network_event', event_qos())
@@ -276,12 +277,23 @@ class WebSocketTeleopBridge(Node):
             self.drive_state = 0
             self.publish_drive_cmd()
             self.publish_fault_text('NETWORK FAULT: ' + result.get('message', '') + '；' + result.get('detail', ''))
+        elif result.get('action') == 'neutral':
+            self.network_neutral = not self.ws_connected
+            self.network_warning_latched = not self.ws_connected
+            self.zero_teleop()
+            self.publish_teleop_cmd()
+            # Executor owns PAUSE and restoration; do not race it with drive_cmd.
+            self.publish_fault_text('NETWORK WARNING: ' + result.get('message', '') + '；' + result.get('detail', ''))
         else:
             self.network_warning_latched = not self.ws_connected
             self.publish_fault_text('NETWORK WARNING: ' + result.get('message', '') + '；' + result.get('detail', ''))
 
     #链路恢复入口 
     def mark_link_restored(self, client_addr=None):
+        self.zero_teleop() if self.network_neutral else None
+        if self.network_neutral:
+            self.publish_teleop_cmd()
+            self.network_neutral = False
         self.ws_connected = True
         self.network_warning_latched = False
         self.active_client_addr = client_addr
@@ -301,13 +313,13 @@ class WebSocketTeleopBridge(Node):
     def link_watchdog_loop(self):
         now = time.monotonic()
         if self.network_event_pending and not self.ws_connected and now - self.network_event_pending[1] > 2.0:
-            # Missing executor acknowledgement is not proof of autonomous mode.
+            # No acknowledgement: stop with PAUSE and warn, never convert a link loss to abort.
             self.network_event_pending = None
-            self.network_fault_latched = True
+            self.network_neutral = True
+            self.network_warning_latched = True
             self.zero_teleop();self.publish_teleop_cmd()
-            self.drive_state = 2;self.publish_drive_cmd()
-            self.publish_abort()
-            self.publish_fault_text('NETWORK FAULT: 执行器未确认断链处置，采取保守急停，需检查控制状态')
+            self.drive_state = 0;self.publish_drive_cmd()
+            self.publish_fault_text('NETWORK WARNING: 执行器未确认断链处置，已请求Neutral，等待连接恢复')
         self.publish_link_ok(self.ws_connected)
 
         # 没客户端连接，且之前不是故障状态时，不一定要强制 abort；

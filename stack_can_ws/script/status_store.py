@@ -36,6 +36,13 @@ def update(state=None, message='', reset=False, network_ack=None, **extra):
                 and data.get('device_message') in tuple('车辆已急停/中止：'+r for r in ('network_disconnected','network_heartbeat_timeout','network_unconfirmed'))
                 and network_ack.get('validated_current_reset') is True
                 and isinstance(network_ack.get('cleared_network_event_id'), str))
+            operator_ack = (state == 'ready' and data.get('device_state') == 'runtime_fault'
+                and reason in ('drive_cmd', '')
+                and data.get('device_message') == '车辆已急停/中止：drive_cmd'
+                and data.get('boot_id') == network_ack.get('boot_id')
+                and network_ack.get('validated_current_reset') is True
+                and network_ack.get('operator_reset') is True)
+            acknowledged = acknowledged or operator_ack
             if not acknowledged:
                 return data
             data['acknowledged_fault'] = dict(message=data.get('device_message'), request_id=network_ack.get('request_id'), cleared_at=time.monotonic())

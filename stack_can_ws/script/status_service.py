@@ -16,7 +16,7 @@ from websockets.legacy.server import serve
 
 from obstacle_warning import summarize
 from health_monitor import StartupHealthCheck
-from status_model import vehicle_state
+from status_model import vehicle_state, fault_presentation
 from status_diagnostics import DiagnosticEvents
 from status_store import read, update
 from can_bus_status import enrich_can_status, poll_can_bus
@@ -84,7 +84,7 @@ class StatusService(StartupHealthCheck):
     def on_reset_result(self, msg):
         try:
             value = json.loads(msg.data)
-            if isinstance(value, dict) and value.get('ok') and value.get('cleared_reason') in ('network_disconnected','network_heartbeat_timeout','network_unconfirmed'):
+            if isinstance(value, dict) and value.get('ok') and value.get('cleared_reason') in ('', 'drive_cmd','network_disconnected','network_heartbeat_timeout','network_unconfirmed'):
                 self.pending_network_ack = (value, time.monotonic())
         except (ValueError, TypeError):
             pass
@@ -137,10 +137,12 @@ class StatusService(StartupHealthCheck):
                     and not self.control.get('estop_reason') and self.control.get('can_available')
                     and not self.control.get('last_send_error') and self.link_ok
                     and self.link_time is not None and now - self.link_time < 1.5
-                    and self.control.get('last_network_reset_request_id') == ack.get('request_id')
-                    and self.control.get('last_network_reset_event_id') == ack.get('cleared_network_event_id')
+                    and ((ack.get('cleared_reason') in ('', 'drive_cmd') and self.control.get('last_paused_reset_request_id') == ack.get('request_id'))
+                         or (ack.get('cleared_reason') in ('network_disconnected','network_heartbeat_timeout','network_unconfirmed')
+                             and self.control.get('last_network_reset_request_id') == ack.get('request_id')
+                             and self.control.get('last_network_reset_event_id') == ack.get('cleared_network_event_id')))
                     and all(p['state'] == 'ready' for p in peripherals.values())):
-                lifecycle = update('ready', '', network_ack=dict(ack, boot_id=lifecycle['boot_id'], validated_current_reset=True))
+                lifecycle = update('ready', '', network_ack=dict(ack, boot_id=lifecycle['boot_id'], validated_current_reset=True, operator_reset=ack.get('cleared_reason') in ('', 'drive_cmd')))
                 self.pending_network_ack = None
         if lifecycle.get('phase') == 'launching' and state == 'starting':
             elapsed = now - lifecycle.get('launch_at', now)
@@ -174,10 +176,13 @@ class StatusService(StartupHealthCheck):
             self.reset_guard_pub.publish(Bool(data=bool(allowed)))
         state = lifecycle['device_state']
         self.diagnostics.set_boot(lifecycle['boot_id'])
-        self.snapshot = {'type': 'device_status', 'version': 1,
+        emergency = fault_presentation(self.control, control_fresh, self.diagnostics.snapshot()['events'])
+        self.snapshot = {'emergency_status': emergency,
+            'device_state_label': ('紧急触发' if emergency['code'] == 'drive_cmd' else emergency['message']) if emergency['active'] else {'runtime_fault': '运行故障：'+lifecycle.get('device_message', ''), 'ready': '就绪', 'starting': '启动中', 'startup_failed': '启动失败：'+lifecycle.get('device_message', '')}.get(state, state),
+            'type': 'device_status', 'version': 1,
             'boot_id': lifecycle['boot_id'], 'device_state': state,
             'device_message': lifecycle.get('device_message', ''),
-            'vehicle_state': vehicle_state(self.control, self.link_ok and self.link_time is not None and now - self.link_time < 1.5) if state == 'ready' and control_fresh else None,
+            'vehicle_state': vehicle_state(self.control, self.link_ok and self.link_time is not None and now - self.link_time < 1.5) if control_fresh else None,
             'peripherals': peripherals,
             'network_status': summarize_network(self.control, control_fresh, self.link_ok,
                 self.link_time is not None and now - self.link_time < 1.5, self.network_event),

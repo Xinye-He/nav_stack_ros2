@@ -194,14 +194,14 @@ def connect_api():
 
 def status_summary(data):
     state_names = {'starting': '启动中', 'startup_failed': '启动失败', 'ready': '就绪', 'runtime_fault': '运行故障'}
-    mode_names = {'trajectory': '循迹中', 'remote': '9010遥控模式', None: '空'}
+    mode_names = {'Neutral': 'Neutral', 'trajectory': '循迹中', 'remote': '9010遥控模式', None: '空'}
     per_names = {'rtk': 'RTK', 'lidar': '雷达', 'ultrasonic': '超声波', 'can': 'CAN'}
     peripherals = []
     for name, item in data.get('peripherals', {}).items():
         state = {'starting': '启动中', 'ready': '就绪', 'error': '错误'}.get(item.get('state'), '未知')
         errors = '；'.join(e.get('message', '') for e in item.get('errors', []))
         peripherals.append(per_names.get(name, name) + ':' + state + ('(' + errors + ')' if errors else ''))
-    return '{} | 模式:{} | {} | {}'.format(state_names.get(data.get('device_state'), '未知'),
+    return '{} | 模式:{} | {} | {}'.format(data.get('device_state_label') or state_names.get(data.get('device_state'), '未知'),
         mode_names.get(data.get('vehicle_state'), '未知'), ' '.join(peripherals), data.get('device_message', '')) + ((' | 网络警告：' + data['network_status'].get('message', '断链')) if data.get('network_status', {}).get('severity') == 'warning' else '')
 
 

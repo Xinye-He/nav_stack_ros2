@@ -243,7 +243,7 @@ class ExecutorPathControl:
             node.bale_active=False
             self.drive.publish(UInt8(data=node.drive_state))
             node._update_safety_state();node._update_control_mode()
-            self.reply(req,True,'OK',('路径加载成功，请按键g开始循迹' if not node.estop_latched and not node.abort_req else '路径加载成功，急停尚未解除，请先处理故障并复位'),path_version=self.loaded_version,
+            self.reply(req,True,'OK',('路径重载成功，请开始循迹' if not node.estop_latched and not node.abort_req else '路径加载成功，急停尚未解除，请先处理故障并复位'),path_version=self.loaded_version,
                 waypoint_count=result['waypoint_count'],path_file=result.get('path_file',''),
                 selected_mode='trajectory',ready_to_start=not node.estop_latched and not node.abort_req)
         elif req['action']=='select':

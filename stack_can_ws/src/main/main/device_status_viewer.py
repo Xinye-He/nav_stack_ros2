@@ -13,7 +13,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from websockets.legacy.client import connect
 
-LABELS = {'starting': '启动中', 'startup_failed': '启动失败', 'ready': '就绪',
+LABELS = {'Neutral': 'Neutral', 'starting': '启动中', 'startup_failed': '启动失败', 'ready': '就绪',
           'runtime_fault': '运行故障', 'error': '错误', 'trajectory': '循迹中',
           'remote': '9010遥控模式', 'alarm': '报警', 'warning': '警告',
           'clear': '安全距离', 'unknown': '未知'}
@@ -34,6 +34,9 @@ def event_time(event):
 
 
 def fault_summary(snapshot):
+    emergency = snapshot.get('emergency_status', {})
+    if emergency.get('active'):
+        return emergency['message']
     message = snapshot.get('device_message') or '无'
     for code, text in (('network_disconnected','9010遥控连接断开'),('network_heartbeat_timeout','9010遥控心跳超时'),('network_unconfirmed','网络故障处置未确认')):
         message = message.replace('车辆已急停/中止：' + code, text + '，车辆已急停，等待手动暂停复位')
@@ -70,7 +73,7 @@ def fault_summary(snapshot):
 
 def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=False):
     fresh = snapshot is not None and age <= 3.0
-    state = label(snapshot.get('device_state')) if fresh else ('断线/状态超时' if snapshot else '等待连接')
+    state = snapshot.get('device_state_label', label(snapshot.get('device_state'))) if fresh else ('断线/状态超时' if snapshot else '等待连接')
     lines = ['Jetson 设备状态（只读，Ctrl+C退出）', '=' * 58,
              '设备：{}    状态接收距今：{}'.format(state, '{:.1f}s'.format(age) if snapshot else '—')]
     if not fresh:

@@ -13,7 +13,7 @@ def summarize_network(control, control_fresh, link_ok, link_fresh, event):
     message = '控制链路未连接'
     if control_fresh and control.get('safety_state') == 'READY' and control.get('control_mode') == 'TRAJ':
         message = '循迹模式上位机断链，仅告警，循迹继续运行'
-    elif event.get('action') == 'warning':
+    elif event.get('action') in ('warning', 'neutral'):
         message = event.get('message', message)
     return dict(state='disconnected' if link_fresh else 'unknown', severity='warning',
                 message=message if link_fresh else '控制链路状态未更新', last_event=event)

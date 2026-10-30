@@ -88,6 +88,7 @@ class StackCanExecutor(Node):
         self.reset_estop_req = False
         self.estop_latched = False
         self.estop_reason = ''
+        self.last_paused_reset_request_id = None
         self.last_network_reset_request_id = None
         self.last_network_reset_event_id = None
         self.safety_state = 'READY'   # ESTOP / REMOTE / READY
@@ -155,6 +156,8 @@ class StackCanExecutor(Node):
     def _on_drive_cmd(self, msg: UInt8):
         if (self.path_control.pending or self.can_maintenance.active) and int(msg.data) == self.DS_RUNNING:
             return
+        if self.network_safety.neutral and int(msg.data) == self.DS_RUNNING:
+            return
         self.drive_state = int(msg.data)
         if self.drive_state == self.DS_ESTOP:
             self.estop_latched = True
@@ -205,6 +208,7 @@ class StackCanExecutor(Node):
             if cleared_reason in NETWORK_REASONS:
                 self.last_network_reset_request_id = request_id
                 self.last_network_reset_event_id = cleared_network_event_id
+            self.last_paused_reset_request_id = request_id
             self.drive_state = self.DS_PAUSED
             self.safety_state = 'READY'
             self.control_mode = 'TELEOP'
@@ -324,10 +328,12 @@ class StackCanExecutor(Node):
 
     def publish_execution_status(self):
         payload = {
+            'last_paused_reset_request_id': self.last_paused_reset_request_id,
             'safety_state': self.safety_state, 'control_mode': self.control_mode,
             'drive_state': self.drive_state, 'command_source': self.teleop_source,
             'estop_reason': self.estop_reason,
             'remote_req': self.remote_req,
+            'network_neutral_active': self.network_safety.neutral,
             'network_estop_active': self.network_safety.active,
             'network_fault_id': self.network_safety.fault_id,
             'last_network_reset_request_id': self.last_network_reset_request_id,
@@ -347,6 +353,11 @@ class StackCanExecutor(Node):
         # 没有 CAN 或总线不可用
         if not (self.enable_can and self.can_bus):
             return
+
+        if self.network_safety.neutral:
+            self.cmd_teleop = self._make_stop_command()
+            if not self.estop_latched and not self.abort_req:
+                self.drive_state = self.DS_PAUSED
 
         # 1) 先安全裁决
         self._update_safety_state()
