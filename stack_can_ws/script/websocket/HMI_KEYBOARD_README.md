@@ -9,7 +9,7 @@ python3 hmi_keyboard_client.py --host 10.144.144.1
 
 在 Jetson 本机运行可使用 `--host 127.0.0.1`。请只保留一个9010控制客户端。
 默认是仅倾倒/捡拾模式（也可显式加 `--work-only`）。连接后依次发送PAUSE、全零指令、手动接管。
-只允许j/k、r暂停复位、c/空格清除所有作业位、x急停；速度、转向、RUN和其他功能均屏蔽。
+支持 !/9 导航重启、o/i CAN查询恢复，以及j/k、r暂停复位、c/空格清除所有作业位、x急停；速度、转向、RUN和其他功能均屏蔽。
 所有cmd都保持速度和转向为0，pick/dump互斥。按r请求解除操作员x触发的急停并保持PAUSE，不自动复位、不绕过任何保护。
 PAUSE下VCU是否执行作业需实车协议确认；先在 `/stack_can/status` 查看pick/dump位，不为触发动作开启RUN。
 
@@ -21,7 +21,7 @@ PAUSE下VCU是否执行作业需实车协议确认；先在 `/stack_can/status` 
 | 按键 | 指令 |
 |---|---|
 | m / u | 手动接管 / 自动循迹 |
-| t | 由服务端切换手动/自动 |
+| t | 遥控/循迹模式切换；切到循迹保持暂停，按g启动 |
 | g / z | RUN / PAUSE |
 | x / r | 急停 / 清零并请求复位 |
 | w或4 / 8 / s或1 | 4km/h / 8km/h / 后退4km/h |
@@ -87,7 +87,35 @@ python3 hmi_keyboard_client.py --host 10.144.144.1 --upload-points /path/points.
 
 此次修改需要重启通信、状态和CAN执行节点后生效；正在运行的旧进程不会热更新。
 
-## 独立重载与启动
+## n重载、t切换
 
-完整模式新增n重载路径（保持暂停），收到trajectory_result重载成功后，y发送独立启动请求并携带path_version。
-默认work-only模式屏蔽两键。n不再模拟旧teleop_key.py的自动RUN行为。详见docs/TRAJECTORY_CONTROL_PROTOCOL.md。
+完整模式n重载成功后选择循迹模式并保持暂停，9010回执message为“路径加载成功，请按键g开始循迹”。t可在启动后直接切换遥控/循迹，无需先n；切到循迹保持暂停，切到遥控清零指令。g在循迹模式下经路径版本、定位、围栏、链路和外设检查后启动。启动时已加载的路径可直接使用；磁盘路径变化后需n重新加载。y已移除。默认work-only屏蔽n/t/g。急停仍须独立处理。
+
+已部署到Jetson；运行中的旧节点需重启导航后加载新逻辑。更新包位于jetson_updates/n_t_control。详见TRAJECTORY_CONTROL_PROTOCOL.md。
+
+## CAN管理（2026-10-30）
+
+默认作业模式和完整模式均支持o查询can0底层状态，i请求单次BUS-OFF恢复。按i表示操作者确认车辆已物理停稳；运行中先按z暂停（默认作业模式已请求暂停）。恢复时维持心跳、屏蔽RUN/复位/路径操作，保留急停，结束保持暂停。接口已恢复但无VCU反馈返回失败，不自动重试。仅在宿主机服务安装且导航加载新版节点后生效，详见CAN_CONTROL_PROTOCOL.md。
+
+## 网络保护和复位更新（2026-10-30）
+
+以执行器实际模式判定：循迹断链仅告警并继续；9010遥控断链急停。重连保持急停，r在默认及完整模式下均为安全暂停复位，不再自动RUN。复位需链路、围栏、外设及控制节点等保护就绪，无其他abort、无CAN维护。等9011显示就绪后再主动选择运行。查询用连接关闭不再触发控制连接断链。详见NETWORK_SAFETY_PROTOCOL.md。
+
+## 9010导航重启（2026-10-30）
+
+首次需在安全停机后手动重启导航加载新接口。以后可使用：
+
+```bash
+python3 hmi_keyboard_client.py --host 127.0.0.1 --device-action status
+python3 hmi_keyboard_client.py --host 127.0.0.1 --device-action restart --confirm-stopped
+```
+
+重启前必须停稳并PAUSE/急停；只读查询不发送控制或心跳。重启请求先返回ACCEPTED，再SCHEDULED，随后连接断开属于预期；须通过9011新boot_id和启动状态确认结果。不自动重试。宿主机安装后的后续启动默认PAUSE，不恢复旧指令缓存。详见DEVICE_RESTART_PROTOCOL.md。
+
+## 导航重启按键（两种键盘模式均可用）
+
+先确认车辆已物理停稳。3秒内连续按两次 `!`：第一次显示确认提示，第二次发送 `{"type":"device","action":"restart","request_id":"restart-唯一ID","confirm_stopped":true}`。其他按键取消第一次确认；超过3秒需重新确认。按 `9` 发送 `device/status` 查询重启任务。
+
+请求发出后禁止继续发送运动命令，保留状态查询和急停；明确拒绝后允许重新确认，结果未知时不自动重试。重启期间9010/9011断开属于预期，需要重开客户端并核对9011新boot_id及启动状态。重启后保持暂停，不自动RUN。
+
+外设启动失败时，只要9010及设备重启接口仍在线即可请求；服务端继续检查停稳和暂停条件。9010未启动时无法通过此按键重启。

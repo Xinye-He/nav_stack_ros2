@@ -21,6 +21,8 @@ class Harness:
     _on_websocket_cmd=Executor._on_websocket_cmd
     loop=Executor.loop
     def __init__(self):
+        self.network_safety=Obj(active=False,fault_id=None)
+        self.can_maintenance=Obj(active=False,request_id=None)
         self.remote_req=False; self.abort_req=False;self.estop_reason='drive_cmd'
         self.estop_latched=True;self.drive_state=2;self.teleop_active=False
         self.paused_reset_guards={name:(True,time.monotonic()) for name in ('围栏','9010链路','外设及控制节点')}
@@ -67,6 +69,6 @@ class ResetTests(unittest.TestCase):
     def test_keyboard_r_uses_new_paused_protocol(self):
         keys=KeyboardCommands(work_only=True)
         self.assertEqual(keys.message('r')['type'],'reset_estop_paused')
-        self.assertEqual(KeyboardCommands(work_only=False).message('r')['type'],'reset_estop')
+        self.assertEqual(KeyboardCommands(work_only=False).message('r')['type'],'reset_estop_paused')
 
 if __name__=='__main__':unittest.main(verbosity=2)

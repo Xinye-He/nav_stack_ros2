@@ -7,6 +7,8 @@ import math
 import struct
 
 import rclpy
+from main.can_management import ExecutorCanMaintenance
+from main.network_safety import ExecutorNetworkSafety, NETWORK_REASONS
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
@@ -86,6 +88,8 @@ class StackCanExecutor(Node):
         self.reset_estop_req = False
         self.estop_latched = False
         self.estop_reason = ''
+        self.last_network_reset_request_id = None
+        self.last_network_reset_event_id = None
         self.safety_state = 'READY'   # ESTOP / REMOTE / READY
         self.control_mode = 'IDLE'    # IDLE / TELEOP / BALE / TRAJ
 
@@ -121,6 +125,8 @@ class StackCanExecutor(Node):
         self.create_subscription(Bool, '/abort', self._on_abort, 1)
         self.create_subscription(Bool, '/reset_estop', self._on_reset_estop, 1)
 
+        self.network_safety = ExecutorNetworkSafety(self)
+        self.can_maintenance = ExecutorCanMaintenance(self)
         self.path_control = ExecutorPathControl(self)
 
         # 定时器：20Hz 输出 CAN
@@ -147,7 +153,7 @@ class StackCanExecutor(Node):
         self.cmd_bale = msg
 
     def _on_drive_cmd(self, msg: UInt8):
-        if self.path_control.pending and int(msg.data) == self.DS_RUNNING:
+        if (self.path_control.pending or self.can_maintenance.active) and int(msg.data) == self.DS_RUNNING:
             return
         self.drive_state = int(msg.data)
         if self.drive_state == self.DS_ESTOP:
@@ -159,7 +165,7 @@ class StackCanExecutor(Node):
         if bool(msg.data):
             self.abort_req = True
             self.estop_latched = True
-            if not self.estop_reason:
+            if not self.estop_reason or self.estop_reason in NETWORK_REASONS:
                 self.estop_reason = 'abort'
 
     def _on_reset_estop(self, msg: Bool):
@@ -174,12 +180,17 @@ class StackCanExecutor(Node):
                 return
         except (ValueError, KeyError, TypeError):
             return
+        cleared_reason = self.estop_reason
+        cleared_network_event_id = self.network_safety.fault_id
         reason = rejection({
             'remote_req': self.remote_req, 'abort_req': self.abort_req,
             'estop_reason': self.estop_reason,
+            'network_fault_only': self.network_safety.active and not self.abort_req,
             'guards': [(name,) + self.paused_reset_guards.get(name, (False, None))
                        for name in ('围栏', '9010链路', '外设及控制节点')],
         }, time.monotonic())
+        if self.can_maintenance.active:
+            reason = 'CAN 恢复维护中，禁止解除急停'
         if not reason:
             # One callback replaces the command and latch atomically. Never RUN.
             self.cmd_teleop = self._make_stop_command()
@@ -189,12 +200,19 @@ class StackCanExecutor(Node):
             self.abort_req = False
             self.estop_latched = False
             self.estop_reason = ''
+            self.network_safety.active = False
+            self.network_safety.fault_id = None
+            if cleared_reason in NETWORK_REASONS:
+                self.last_network_reset_request_id = request_id
+                self.last_network_reset_event_id = cleared_network_event_id
             self.drive_state = self.DS_PAUSED
             self.safety_state = 'READY'
             self.control_mode = 'TELEOP'
         result = {'type': 'reset_estop_result', 'request_id': request_id,
                   'ok': not bool(reason), 'message': reason or '急停已解除，保持PAUSE、零速零转向',
-                  'drive_state': self.drive_state, 'estop': self.estop_latched}
+                  'drive_state': self.drive_state, 'estop': self.estop_latched,
+                  'cleared_reason': cleared_reason if not reason else None,
+                  'cleared_network_event_id': cleared_network_event_id if not reason else None}
         self.pub_paused_reset_result.publish(String(data=json.dumps(result, ensure_ascii=False)))
 
     def _make_stop_command(self) -> StackCommand:
@@ -222,6 +240,12 @@ class StackCanExecutor(Node):
         )
 
     def _try_clear_estop(self):
+        if getattr(self, 'network_safety', None) is not None and self.network_safety.active:
+            self.reset_estop_req = False
+            return
+        if getattr(self, 'can_maintenance', None) is not None and self.can_maintenance.active:
+            self.reset_estop_req = False
+            return
         if getattr(self, "path_control", None) is not None and self.path_control.pending:
             self.reset_estop_req = False
             return
@@ -303,6 +327,13 @@ class StackCanExecutor(Node):
             'safety_state': self.safety_state, 'control_mode': self.control_mode,
             'drive_state': self.drive_state, 'command_source': self.teleop_source,
             'estop_reason': self.estop_reason,
+            'remote_req': self.remote_req,
+            'network_estop_active': self.network_safety.active,
+            'network_fault_id': self.network_safety.fault_id,
+            'last_network_reset_request_id': self.last_network_reset_request_id,
+            'last_network_reset_event_id': self.last_network_reset_event_id,
+            'can_maintenance_active': self.can_maintenance.active,
+            'can_maintenance_request_id': self.can_maintenance.request_id,
             'can_available': bool(self.enable_can and self.can_bus),
             'last_send_error': self.last_send_error,
         }
@@ -311,6 +342,8 @@ class StackCanExecutor(Node):
     def loop(self):
         if getattr(self, "path_control", None) is not None and self.path_control.pending:
             self.path_control.pause()
+        if self.can_maintenance.active:
+            self.can_maintenance.pause()
         # 没有 CAN 或总线不可用
         if not (self.enable_can and self.can_bus):
             return

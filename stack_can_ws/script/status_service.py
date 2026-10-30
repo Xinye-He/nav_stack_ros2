@@ -19,6 +19,8 @@ from health_monitor import StartupHealthCheck
 from status_model import vehicle_state
 from status_diagnostics import DiagnosticEvents
 from status_store import read, update
+from can_bus_status import enrich_can_status, poll_can_bus
+from network_status import summarize_network
 
 
 class StatusService(StartupHealthCheck):
@@ -28,11 +30,16 @@ class StatusService(StartupHealthCheck):
             fix_topic='/fix', heading_topic='/heading_deg', lidar_topic='/rslidar_points',
             ultrasonic_topic='/ultrasonic_distances', can_feedback_topic='/stack_can/feedback',
             startup_timeout=startup_timeout, runtime_timeout=runtime_timeout, once=False)
+        self.can_bus_status = None
+        self.can_bus_received = None
+        self.can_bus_error = ''
         self.obstacle_ranges = None
         self.obstacle_received = None
         self.obstacle_threshold = obstacle_threshold
         self.obstacle_warning_threshold = obstacle_warning_threshold
         self.reset_guard_pub = None
+        self.network_event = None
+        self.pending_network_ack = None
         self.control = {}
         self.control_time = None
         self.link_ok = False
@@ -45,6 +52,8 @@ class StatusService(StartupHealthCheck):
         self.reset_guard_pub = self.create_publisher(Bool, '/safety/reset_peripherals_ready', 10)
         self.create_subscription(String, '/vehicle/execution_status', self.on_control, 10)
         self.create_subscription(Bool, '/network_link_ok', self.on_link, 10)
+        self.create_subscription(String, '/safety/network_result', self.on_network_event, 10)
+        self.create_subscription(String, '/vehicle/reset_result', self.on_reset_result, 10)
         self.create_subscription(Log, '/rosout', self.on_log, 100)
         self.snapshot = {}
 
@@ -63,6 +72,22 @@ class StatusService(StartupHealthCheck):
             self.control_time = time.monotonic()
         except (ValueError, TypeError):
             return
+
+    def on_network_event(self, msg):
+        try:
+            value = json.loads(msg.data)
+            if isinstance(value, dict):
+                self.network_event = value
+        except (ValueError, TypeError):
+            pass
+
+    def on_reset_result(self, msg):
+        try:
+            value = json.loads(msg.data)
+            if isinstance(value, dict) and value.get('ok') and value.get('cleared_reason') in ('network_disconnected','network_heartbeat_timeout','network_unconfirmed'):
+                self.pending_network_ack = (value, time.monotonic())
+        except (ValueError, TypeError):
+            pass
 
     def on_link(self, msg):
         self.link_ok = bool(msg.data)
@@ -92,6 +117,9 @@ class StatusService(StartupHealthCheck):
             elif component in self.driver_errors:
                 item['state'] = 'error'
                 item['errors'].append(self.driver_errors[component])
+        if 'can' in peripherals:
+            peripherals['can'] = enrich_can_status(peripherals['can'], self.can_bus_status,
+                self.can_bus_received, now, grace, self.can_bus_error)
         required = {'stack_can_executor', 'traj_waypoint_follower', 'geofence_monitor',
                     'dr_odometry', 'motor_protection_node',
                     'vehicle_data_websocket_server', 'websocket_teleop_bridge'}
@@ -100,6 +128,20 @@ class StatusService(StartupHealthCheck):
         control_fresh = self.control_time is not None and now - self.control_time <= 3.0
         failures = [error['message'] for item in peripherals.values()
                     if item['state'] == 'error' for error in item['errors']]
+        if self.pending_network_ack:
+            ack, received = self.pending_network_ack
+            if now - received > 5:
+                self.pending_network_ack = None
+            elif (state == 'runtime_fault' and not failures and not missing and control_fresh
+                    and self.control.get('safety_state') == 'READY' and self.control.get('drive_state') == 0
+                    and not self.control.get('estop_reason') and self.control.get('can_available')
+                    and not self.control.get('last_send_error') and self.link_ok
+                    and self.link_time is not None and now - self.link_time < 1.5
+                    and self.control.get('last_network_reset_request_id') == ack.get('request_id')
+                    and self.control.get('last_network_reset_event_id') == ack.get('cleared_network_event_id')
+                    and all(p['state'] == 'ready' for p in peripherals.values())):
+                lifecycle = update('ready', '', network_ack=dict(ack, boot_id=lifecycle['boot_id'], validated_current_reset=True))
+                self.pending_network_ack = None
         if lifecycle.get('phase') == 'launching' and state == 'starting':
             elapsed = now - lifecycle.get('launch_at', now)
             if not failures and all(p['state'] == 'ready' for p in peripherals.values()) and not missing and control_fresh:
@@ -124,7 +166,7 @@ class StatusService(StartupHealthCheck):
             elif self.control.get('safety_state') == 'ESTOP':
                 failures.append('车辆已急停/中止：' + self.control.get('estop_reason', ''))
             if failures:
-                lifecycle = update('runtime_fault', '；'.join(failures))
+                lifecycle = update('runtime_fault', '；'.join(failures), fault_event_id=self.control.get('network_fault_id'))
         if self.reset_guard_pub is not None:
             allowed = (not missing and control_fresh and self.control.get('can_available')
                        and not self.control.get('last_send_error')
@@ -137,6 +179,8 @@ class StatusService(StartupHealthCheck):
             'device_message': lifecycle.get('device_message', ''),
             'vehicle_state': vehicle_state(self.control, self.link_ok and self.link_time is not None and now - self.link_time < 1.5) if state == 'ready' and control_fresh else None,
             'peripherals': peripherals,
+            'network_status': summarize_network(self.control, control_fresh, self.link_ok,
+                self.link_time is not None and now - self.link_time < 1.5, self.network_event),
             'diagnostics': self.diagnostics.snapshot(),
             'execution_status': dict(self.control, fresh=control_fresh),
             'obstacle_warning': summarize(self.obstacle_ranges, self.obstacle_received, now,
@@ -154,6 +198,7 @@ class StatusService(StartupHealthCheck):
 async def run(args):
     rclpy.init()
     node = StatusService(args.startup_timeout, args.runtime_timeout, args.obstacle_threshold_m, args.obstacle_warning_threshold_m)
+    bus_task = asyncio.create_task(poll_can_bus(node))
     marker = Path(str(args.state_file) + '.ready')
     async def handler(ws, path):
         if path != '/status':
@@ -176,6 +221,8 @@ async def run(args):
                 rclpy.spin_once(node, timeout_sec=0.0)
                 await asyncio.sleep(0.01)
     finally:
+        bus_task.cancel()
+        await asyncio.gather(bus_task, return_exceptions=True)
         marker.unlink(missing_ok=True)
         node.destroy_node()
         if rclpy.ok():

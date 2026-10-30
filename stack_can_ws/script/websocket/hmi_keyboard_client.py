@@ -7,9 +7,13 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import uuid
 
 WORK_HELP = """
+  ! 3秒内按两次：确认已停稳并请求重启导航    9 查询导航重启任务
+  o 查询CAN底层状态  i 恢复CAN（确认车辆已停止，恢复后保持暂停）
+
 仅倾倒/捡拾测试：已请求PAUSE、全零指令、手动接管。不会发送RUN；r仅请求保持PAUSE的复位。
   j 倾倒开/关    k 捡拾开/关（两者互斥）
   r 暂停复位    c/空格 清除所有作业位    x 急停    ? 帮助    Esc/Ctrl+C 退出
@@ -17,13 +21,15 @@ WORK_HELP = """
 """
 
 HELP = """
+  ! 3秒内按两次：确认已停稳并请求重启导航    9 查询导航重启任务
+  o 查询CAN底层状态  i 恢复CAN（按下即确认车辆已停止；不会RUN或解除急停）
 9010 上位机模拟客户端（按键立即发送，无需回车）
-  m 手动接管       u 自动循迹       t 切换手动/自动
-  g RUN            z PAUSE          x 急停           r 清零并请求复位
+  m 手动接管       u 自动循迹       t 切换遥控/循迹（循迹保持暂停）
+  g RUN            z PAUSE          x 急停           r 安全复位并保持暂停
   w/4 前进4km/h    8 前进8km/h      s/1 后退4km/h    0 速度归零
   a/d 左右10°     q/e 左右20°      c/空格 速度和转角归零
   j 倾倒           k 捡拾           l 卸载           h 捡拾动作
-  n 重载路径并进入零速遥控（随后按t启动循迹）
+  n 重载路径并选择循迹（成功后按g开始循迹）
   f 任务完成       v 开启相机       b 关闭相机       p 查询相机
   ? 查看帮助       Esc/Ctrl+C 退出
 速度为持续设定值，松开按键不会自动停车。普通车辆命令无成功回执，请结合9011状态判断。
@@ -39,6 +45,9 @@ class KeyboardCommands:
     def __init__(self, work_only=False):
         self.path_version = None
         self.work_only = work_only
+        self.restart_armed_at = None
+        self.restart_pending = False
+        self.restart_request_id = None
         self.reset()
 
     def reset(self):
@@ -46,10 +55,36 @@ class KeyboardCommands:
                             pick=False, unload=False, dump=False, pick_action=False)
 
     def message(self, key):
-        if self.work_only and key not in ('j', 'k', 'c', ' ', 'x', 'r'):
-            emit('[已屏蔽]', '仅允许 j/k、r暂停复位、c/空格清零、x急停。')
+        if key == '!':
+            if self.restart_pending:
+                emit('[重启提示]', '重启已请求，按9查询任务；请通过9011新boot_id确认结果，不重复发送。')
+                return None
+            now = time.monotonic()
+            if self.restart_armed_at is None or now - self.restart_armed_at > 3:
+                self.restart_armed_at = now
+                emit('[重启确认]', '请确认车辆已物理停稳；3秒内再次按!请求重启导航，其他按键取消。重启后保持暂停。')
+                return None
+            self.restart_armed_at = None
+            self.reset()
+            self.path_version = None
+            self.restart_pending = True
+            self.restart_request_id = 'restart-' + uuid.uuid4().hex
+            return dict(type='device', action='restart', request_id=self.restart_request_id, confirm_stopped=True)
+        self.restart_armed_at = None
+        if key == '9':
+            return dict(type='device', action='status', request_id='device-' + uuid.uuid4().hex)
+        if self.restart_pending and key not in ('x', 'o', 'p'):
+            emit('[重启提示]', '重启结果尚未确认，仅允许9查询重启、o查询CAN、p查询相机或x急停。')
             return None
-        if self.work_only and key == 'r':
+        if key in ('o', 'i'):
+            if key == 'i':
+                self.reset()
+            return dict(type='can', action='status' if key == 'o' else 'recover',
+                        request_id='can-' + uuid.uuid4().hex, **({'confirm_stopped': True} if key == 'i' else {}))
+        if self.work_only and key not in ('j', 'k', 'c', ' ', 'x', 'r'):
+            emit('[已屏蔽]', '仅允许 j/k、r暂停复位、c/空格清零、x急停、o/i CAN查询恢复及!/9导航重启控制。')
+            return None
+        if key == 'r':
             self.reset()
             return {'type': 'reset_estop_paused', 'request_id': 'paused-' + uuid.uuid4().hex}
         if self.work_only:
@@ -68,7 +103,7 @@ class KeyboardCommands:
                   'u': {'type': 'active', 'value': False},
                   'g': {'type': 'drive', 'state': 1},
                   'z': {'type': 'drive', 'state': 0}, 'x': {'type': 'drive', 'state': 2},
-                  'r': {'type': 'reset_estop'}, 'f': {'type': 'task_done'}}
+                  'f': {'type': 'task_done'}}
         if key in simple:
             if key in ('x', 'r'):
                 self.reset()
@@ -97,6 +132,17 @@ class KeyboardCommands:
         else:
             return None
         return dict(type='cmd', **self.command)
+
+    def observe_result(self, value):
+        if not isinstance(value, dict) or value.get('type') != 'device_result':
+            return
+        if value.get('request_id') != self.restart_request_id or value.get('action') != 'restart':
+            return
+        uncertain = value.get('code') in ('RESTART_RESULT_UNKNOWN', 'RESTART_VERIFY_REQUIRED')
+        held = value.get('maintenance_held') or (value.get('job') or {}).get('state') in ('scheduled', 'restarting', 'unknown')
+        if value.get('ok') is False and not uncertain and not held:
+            self.restart_pending = False
+            emit('[重启提示]', '重启未执行；处理回执原因后，可重新按两次!请求。')
 
 
 @contextmanager
@@ -152,7 +198,7 @@ def status_summary(data):
         errors = '；'.join(e.get('message', '') for e in item.get('errors', []))
         peripherals.append(per_names.get(name, name) + ':' + state + ('(' + errors + ')' if errors else ''))
     return '{} | 模式:{} | {} | {}'.format(state_names.get(data.get('device_state'), '未知'),
-        mode_names.get(data.get('vehicle_state'), '未知'), ' '.join(peripherals), data.get('device_message', ''))
+        mode_names.get(data.get('vehicle_state'), '未知'), ' '.join(peripherals), data.get('device_message', '')) + ((' | 网络警告：' + data['network_status'].get('message', '断链')) if data.get('network_status', {}).get('severity') == 'warning' else '')
 
 
 async def receive_status(args, connect):
@@ -183,6 +229,7 @@ async def keyboard(queue, commands, send):
         if key in ('\x1b', '\x04'):
             return
         if key == '?':
+            commands.restart_armed_at = None
             print(WORK_HELP if commands.work_only else HELP, flush=True)
             continue
         msg = commands.message(key.lower())
@@ -222,6 +269,43 @@ async def run(args):
                 raise RuntimeError('CSV 上传失败')
         return
 
+    if getattr(args, 'device_action', None):
+        action = args.device_action
+        rid = 'device-' + uuid.uuid4().hex
+        url = 'ws://{}:{}'.format(args.host, args.control_port)
+        async with connect(url, open_timeout=5) as ws:
+            request = dict(type='device', action=action, request_id=rid)
+            if action == 'restart':request['confirm_stopped'] = args.confirm_stopped
+            await ws.send(json.dumps(request))
+            emit('[9010发送]', request)
+            async def heartbeat():
+                while True:
+                    await ws.send(json.dumps(dict(type='heartbeat')))
+                    await asyncio.sleep(.5)
+            pulse = asyncio.create_task(heartbeat()) if action == 'restart' else None
+            accepted = False
+            try:
+                while True:
+                    try:
+                        value = json.loads(await asyncio.wait_for(ws.recv(), 20))
+                    except Exception:
+                        if accepted:
+                            emit('[重启进度]', '已收到接受回执，但后续连接断开或进度未知；请重连9011核对新boot_id，不自动重试。')
+                            return
+                        raise
+                    emit('[9010回复]', value)
+                    if value.get('request_id') != rid:continue
+                    if not value.get('ok'):raise RuntimeError(value.get('message', value.get('code')))
+                    if value.get('code') == 'RESTART_ACCEPTED':accepted = True
+                    if action == 'status' or value.get('code') in ('RESTART_SCHEDULED','RESTART_ALREADY_REQUESTED'):
+                        return
+                    # RESTART_ACCEPTED is only the first phase. Wait for scheduled
+                    # or a rejection; do not silently retry any request.
+            finally:
+                if pulse:
+                    pulse.cancel();await asyncio.gather(pulse, return_exceptions=True)
+        return
+
     tasks = [asyncio.create_task(receive_status(args, connect))]
     try:
         if args.status_only:
@@ -250,9 +334,12 @@ async def run(args):
                     async for raw in ws:
                         try: value = json.loads(raw)
                         except ValueError: value = raw
+                        commands.observe_result(value)
                         if isinstance(value, dict) and value.get('type') == 'trajectory_result' and value.get('action') == 'reload':
                             commands.path_version = value.get('path_version') if value.get('ok') else None
                         emit('[9010回复]', value)
+                        if isinstance(value, dict) and value.get('type') == 'trajectory_result' and value.get('ok'):
+                            emit('[路径/模式提示]', value.get('message', '操作成功'))
                     raise RuntimeError('9010 控制连接已断开；不会自动重连或重发运动指令。')
                 controls = [asyncio.create_task(keyboard(queue, commands, send)),
                             asyncio.create_task(heartbeat()), asyncio.create_task(responses())]
@@ -278,6 +365,8 @@ def parse_args():
     parser.add_argument('--status-port', type=int, default=9011)
     parser.add_argument('--csv-port', type=int, default=9002)
     modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--device-action', choices=('status','restart'), help='查询宿主机重启任务，或请求重启导航（需要停止确认）')
+    parser.add_argument('--confirm-stopped', action='store_true', help='操作者确认车辆已物理停稳，仅用于设备重启')
     modes.add_argument('--status-only', action='store_true', help='只读状态，不连接远控端口')
     modes.add_argument('--dry-run', action='store_true', help='离线打印 JSON，不发送')
     modes.add_argument('--upload-fence', metavar='CSV', help='上传围栏 CSV 后退出（不连接9010）')
@@ -288,6 +377,8 @@ def parse_args():
     parser.add_argument('--keys', help='仅用于 dry-run，例如 mgwac')
     parser.add_argument('--verbose', action='store_true', help='显示心跳和完整状态 JSON')
     args = parser.parse_args()
+    if args.device_action == 'restart' and not args.confirm_stopped:
+        parser.error('导航重启前必须停稳，并明确指定 --confirm-stopped')
     if args.keys is not None and not args.dry_run:
         parser.error('--keys 只能与 --dry-run 一起使用')
     return args

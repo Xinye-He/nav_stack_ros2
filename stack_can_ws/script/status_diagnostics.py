@@ -25,6 +25,8 @@ class DiagnosticEvents:
             rule = ('GEOFENCE', 'trigger_report' if 'publish /abort = True' in text else 'related_log')
         elif source == 'motor_protection_node' and (level >= 30):
             rule = ('MOTOR_PROTECTION', 'trigger_report' if 'MOTOR PROTECTION ABORT:' in text else 'related_log')
+        elif source == 'websocket_teleop_bridge' and 'NETWORK WARNING:' in text:
+            rule = ('NETWORK_WARNING', 'related_log')
         elif source == 'websocket_teleop_bridge' and ('NETWORK FAULT:' in text):
             rule = ('NETWORK_FAULT', 'trigger_report')
         elif source == 'stack_can_executor' and ('safety=ESTOP' in text or level >= 40):

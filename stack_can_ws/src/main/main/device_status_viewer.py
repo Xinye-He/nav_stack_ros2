@@ -35,6 +35,8 @@ def event_time(event):
 
 def fault_summary(snapshot):
     message = snapshot.get('device_message') or '无'
+    for code, text in (('network_disconnected','9010遥控连接断开'),('network_heartbeat_timeout','9010遥控心跳超时'),('network_unconfirmed','网络故障处置未确认')):
+        message = message.replace('车辆已急停/中止：' + code, text + '，车辆已急停，等待手动暂停复位')
     if snapshot.get('device_state') != 'runtime_fault' or 'abort' not in message.lower():
         return message
     events = snapshot.get('diagnostics', {}).get('events', [])
@@ -78,6 +80,9 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
         return '\n'.join(lines)
     lines += ['原因：' + fault_summary(snapshot),
               '车辆模式：' + label(snapshot.get('vehicle_state'))]
+    network = snapshot.get('network_status', {})
+    if network.get('severity') == 'warning':
+        lines.append('网络警告：' + network.get('message', '上位机断连'))
     if execution and execution_age <= 3.0:
         lines += ['执行器：{}  控制模式：{}  drive_state：{}'.format(
             execution.get('safety_state', '—'), execution.get('control_mode', '—'), execution.get('drive_state', '—'))]
@@ -87,6 +92,11 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
     for key, name in [('rtk', 'RTK'), ('lidar', '激光雷达'), ('ultrasonic', '超声波'), ('can', 'CAN')]:
         item = snapshot.get('peripherals', {}).get(key, {})
         lines.append('{}：{}    数据年龄：{} ms'.format(name, label(item.get('state')), item.get('data_age_ms', '—')))
+        if key == 'can' and item.get('bus'):
+            bus = item['bus']
+            lines.append('  总线：{}  波特率：{}  错误计数 TX/RX：{}/{}  状态年龄：{} ms'.format(
+                bus.get('state', '未知'), bus.get('bitrate', '—'), bus.get('tx_error_counter', '—'),
+                bus.get('rx_error_counter', '—'), bus.get('status_age_ms', '—')))
         for error in item.get('errors', []):
             lines.append('  {}：{}'.format(error.get('code', ''), error.get('message', '')))
     obstacle = snapshot.get('obstacle_warning', {})

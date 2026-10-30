@@ -69,6 +69,12 @@ if [ "$DEMO_NONINTERACTIVE" = "1" ]; then
     DOCKER_TERMINAL_ARGS=()
 fi
 
+# Remote restart (and its installation) arms persistent safe startup.
+NAV_START_PAUSED="${NAV_START_PAUSED:-0}"
+if [ -f "$STACK_CAN_WS_DIR/script/device_control/.runtime/start_paused.json" ]; then
+    NAV_START_PAUSED=1
+fi
+
 # 避免容器名冲突
 docker rm -f nav_stack_ros2 >/dev/null 2>&1 || true
 
@@ -81,6 +87,7 @@ docker run --runtime nvidia "${DOCKER_TERMINAL_ARGS[@]}" --rm \
     -e TGT_CMD="${USER_COMMAND:-}" \
     -e START_DOCKER_STARTUP \
     -e DEMO_NONINTERACTIVE="$DEMO_NONINTERACTIVE" \
+    -e NAV_START_PAUSED="$NAV_START_PAUSED" \
     -e RMW_IMPLEMENTATION \
     -e ROS_DOMAIN_ID \
     -v /tmp/argus_socket:/tmp/argus_socket \

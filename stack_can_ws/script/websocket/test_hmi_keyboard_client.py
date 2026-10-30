@@ -10,6 +10,33 @@ from unittest.mock import patch
 import hmi_keyboard_client as hmi
 
 class MappingTests(unittest.TestCase):
+    def test_restart_confirmation_and_results(self):
+        for work_only in (True, False):
+            keys = hmi.KeyboardCommands(work_only=work_only)
+            with patch.object(hmi.time, 'monotonic', side_effect=[0, 4, 5]), redirect_stdout(io.StringIO()):
+                self.assertIsNone(keys.message('!'))
+                self.assertIsNone(keys.message('!'))  # Expired confirmation rearms.
+                request = keys.message('!')
+                self.assertEqual(request['action'], 'restart')
+                self.assertTrue(request['confirm_stopped'])
+                self.assertIsNone(keys.message('!'))
+                self.assertIsNone(keys.message('g'))
+                self.assertEqual(keys.message('9')['action'], 'status')
+                self.assertEqual(keys.message('x')['state'], 2)
+                result = dict(type='device_result', action='restart', request_id=request['request_id'], ok=False)
+                keys.observe_result(dict(result, code='RESTART_RESULT_UNKNOWN'))
+                self.assertTrue(keys.restart_pending)
+                keys.observe_result(dict(result, code='DEVICE_REQUEST_REJECTED'))
+                self.assertFalse(keys.restart_pending)
+
+    def test_other_key_cancels_restart_confirmation(self):
+        keys = hmi.KeyboardCommands()
+        with redirect_stdout(io.StringIO()):
+            keys.message('!')
+            self.assertEqual(keys.message('9')['action'], 'status')
+            self.assertIsNone(keys.message('!'))
+            self.assertFalse(keys.restart_pending)
+
     def test_motion_and_stop(self):
         keys=hmi.KeyboardCommands()
         self.assertEqual(keys.message('m'), {'type':'active','value':True})

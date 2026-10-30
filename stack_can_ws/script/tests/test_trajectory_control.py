@@ -37,16 +37,17 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):load_snapshot(p)
             p.write_text('0,29,119,90\n0,29,119,90\n')
             with self.assertRaises(ValueError):load_snapshot(p)
-    def test_reload_enters_zero_teleop_without_starting_follower(self):
+    def test_reload_selects_paused_trajectory_without_run(self):
         node=Node();ctl=ExecutorPathControl(node)
         ctl.handle(message('reload'))
         self.assertEqual(node.drive_state,0);self.assertTrue(node.teleop_active)
         self.assertIsNone(node.cmd_traj)
         ctl.on_result(String(data=json.dumps(dict(request_id='r1',action='reload',ok=True,path_version='v1',waypoint_count=2))))
         result=json.loads(node.pubs['/vehicle/trajectory_result'].publish.call_args.args[0].data)
-        self.assertTrue(result['ok']);self.assertEqual(result['drive_state'],1)
-        self.assertTrue(node.teleop_active);self.assertTrue(node._is_zero_cmd(node.cmd_teleop))
-        node.pubs['/drive_cmd'].publish.assert_not_called()
+        self.assertTrue(result['ok']);self.assertEqual(result['drive_state'],0)
+        self.assertEqual(result['message'],'路径加载成功，请按键g开始循迹')
+        self.assertFalse(node.teleop_active);self.assertTrue(node._is_zero_cmd(node.cmd_teleop))
+        self.assertEqual(node.pubs['/drive_cmd'].publish.call_args.args[0].data,0)
     def test_start_needs_reload_and_all_guards(self):
         node=Node();ctl=ExecutorPathControl(node)
         ctl.handle(message('start',version='v1'));self.assertIsNone(ctl.pending)
@@ -71,6 +72,21 @@ class Tests(unittest.TestCase):
         ctl.pending=(ctl.pending[0],time.monotonic()-9);ctl.check_timeout()
         self.assertIsNone(ctl.pending);self.assertEqual(node.drive_state,0)
         node.pubs['/drive_cmd'].publish.assert_not_called()
+    def test_follower_recognizes_initial_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            node=Node();node.path_csv=str(Path(tmp)/'points.csv')
+            Path(node.path_csv).write_text('0,29,119,90,0\n')
+            node.waypoints_xy=[(0,0,0,0)]
+            ctl=FollowerPathControl(node,Geo,lambda v:v)
+            self.assertEqual(ctl.version,load_snapshot(node.path_csv)[1])
+            node.cur_x=node.cur_y=node.cur_yaw=0
+            ctl.position_received=ctl.heading_received=time.monotonic()
+            ctl.handle(message('start'))
+            self.assertTrue(json.loads(ctl.pub.publish.call_args.args[0].data)['ok'])
+            Path(node.path_csv).write_text('0,29.1,119,90,0\n')
+            ctl.handle(message('start'))
+            self.assertFalse(json.loads(ctl.pub.publish.call_args.args[0].data)['ok'])
+
     def test_follower_reload_is_transactional_and_start_only_prepares(self):
         with tempfile.TemporaryDirectory() as tmp:
             node=Node();node.path_csv=str(Path(tmp)/'points.csv');node.map_frame='map'
@@ -97,6 +113,23 @@ class Tests(unittest.TestCase):
         work=KeyboardCommands(work_only=True)
         with __import__('contextlib').redirect_stdout(__import__('io').StringIO()):
             self.assertIsNone(work.message('n'));self.assertIsNone(work.message('t'));self.assertIsNone(work.message('y'))
+    def test_select_without_reload_keeps_paused(self):
+        node=Node();ctl=ExecutorPathControl(node)
+        ctl.handle(message('select'))
+        self.assertIsNotNone(ctl.pending)
+        ctl.on_result(String(data=json.dumps(dict(request_id='r1',action='select',ok=True,path_version='boot-version'))))
+        self.assertFalse(node.teleop_active);self.assertEqual(node.drive_state,0)
+        self.assertEqual(ctl.loaded_version,'boot-version')
+        self.assertEqual(node.pubs['/drive_cmd'].publish.call_args.args[0].data,0)
+
+    def test_start_uses_boot_path_without_reload(self):
+        node=Node();ctl=ExecutorPathControl(node);ctl.traj_received=time.monotonic()
+        ctl.handle(message('start'))
+        self.assertIsNotNone(ctl.pending)
+        ctl.on_result(String(data=json.dumps(dict(request_id='r1',action='start',ok=True,path_version='boot-version',waypoint_count=2))))
+        self.assertEqual(ctl.loaded_version,'boot-version')
+        self.assertEqual(node.drive_state,1)
+
     def test_remote_switch_zero_and_pause_follower(self):
         node=Node();node.teleop_active=False;node.drive_state=1
         ctl=ExecutorPathControl(node);ctl.loaded_version='v1'
@@ -110,10 +143,10 @@ class Tests(unittest.TestCase):
         ctl=ExecutorPathControl(node);ctl.handle(message('reload'))
         ctl.on_result(String(data=json.dumps(dict(request_id='r1',action='reload',ok=True,path_version='v1',waypoint_count=2))))
         self.assertEqual(node.drive_state,2);self.assertTrue(node.estop_latched)
-        node.pubs['/drive_cmd'].publish.assert_not_called()
+        self.assertEqual(node.pubs['/drive_cmd'].publish.call_args.args[0].data,2)
     def test_bridge_toggle_uses_loaded_version_and_current_mode(self):
         async def check(active, expected):
-            node=Node();node.teleop_active=active;node.zero_teleop=Mock()
+            node=Node();node.teleop_active=active;node.zero_teleop=Mock();node.publish_teleop_active=Mock()
             ctl=BridgePathClient(node);ctl.loaded_version='v1'
             sent=[]
             class WS:
@@ -126,8 +159,8 @@ class Tests(unittest.TestCase):
             ctl.pub.publish.side_effect=answer
             await ctl.request(WS(),dict(action='toggle',request_id='toggle1'))
             self.assertEqual(sent[0]['action'],expected)
-            self.assertEqual(node.teleop_active,expected!='start')
+            self.assertEqual(node.teleop_active,expected=='remote')
             node.zero_teleop.assert_called_once()
-        asyncio.run(check(True,'start'))
+        asyncio.run(check(True,'select'))
         asyncio.run(check(False,'remote'))
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -13,7 +13,6 @@ from std_msgs.msg import Float32
 from geometry_msgs.msg import TransformStamped
 
 from tf2_ros import TransformBroadcaster
-from tf_transformations import quaternion_from_euler
 
 
 # WGS84 constants (semi-major axis a and flattening f)
@@ -243,7 +242,10 @@ class RtkCenterFromNmea(Node):
 
         # local ENU odom of center
         e, n = self.latlon_to_local_enu(lat_c, lon_c)
-        qx, qy, qz, qw = quaternion_from_euler(0.0, 0.0, yaw_vehicle)
+        # Pure yaw rotation: quaternion components in ROS (x, y, z, w) order.
+        qx, qy = 0.0, 0.0
+        qz = math.sin(yaw_vehicle / 2.0)
+        qw = math.cos(yaw_vehicle / 2.0)
 
         odom = Odometry()
         odom.header.stamp = fix_c.header.stamp

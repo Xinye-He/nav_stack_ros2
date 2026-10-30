@@ -18,7 +18,7 @@ def read():
         return {}
 
 
-def update(state=None, message='', reset=False, **extra):
+def update(state=None, message='', reset=False, network_ack=None, **extra):
     PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(str(PATH) + '.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -26,9 +26,22 @@ def update(state=None, message='', reset=False, **extra):
         if not data:
             data = {'boot_id': str(uuid.uuid4()), 'started_at': time.monotonic(),
                     'ever_ready': False, 'device_state': 'starting'}
+        acknowledged = False
+        if network_ack is not None:
+            reason = network_ack.get('cleared_reason')
+            expected = '车辆已急停/中止：' + str(reason)
+            acknowledged = (state == 'ready' and data.get('device_state') == 'runtime_fault'
+                and reason in ('network_disconnected','network_heartbeat_timeout','network_unconfirmed')
+                and data.get('boot_id') == network_ack.get('boot_id')
+                and data.get('device_message') in tuple('车辆已急停/中止：'+r for r in ('network_disconnected','network_heartbeat_timeout','network_unconfirmed'))
+                and network_ack.get('validated_current_reset') is True
+                and isinstance(network_ack.get('cleared_network_event_id'), str))
+            if not acknowledged:
+                return data
+            data['acknowledged_fault'] = dict(message=data.get('device_message'), request_id=network_ack.get('request_id'), cleared_at=time.monotonic())
         # Preserve the first specific failure when the launch wrapper also exits.
         failed = data.get('device_state') in ('startup_failed', 'runtime_fault')
-        if state and (not failed or state == 'starting' or reset):
+        if state and (not failed or state == 'starting' or reset or acknowledged):
             data.update(device_state=state, device_message=message)
             if state == 'starting':
                 data['ever_ready'] = False

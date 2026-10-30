@@ -39,7 +39,7 @@ def publish(pub,data):
 
 def request_data(msg):
     data=json.loads(msg.data)
-    if not isinstance(data,dict) or data.get('action') not in ('reload','start','remote'):
+    if not isinstance(data,dict) or data.get('action') not in ('reload','start','remote','select'):
         raise ValueError('无效路径操作')
     rid=data.get('request_id')
     if not isinstance(rid,str) or not 1<=len(rid)<=128:raise ValueError('无效request_id')
@@ -50,6 +50,10 @@ class FollowerPathControl:
     def __init__(self,node,geo_class,heading_converter):
         self.node=node;self.geo_class=geo_class;self.heading_converter=heading_converter
         self.version=None
+        # The follower has already loaded its geometry before constructing us.
+        if getattr(node, 'waypoints_xy', None):
+            try: _, self.version = load_snapshot(node.path_csv)
+            except (OSError, ValueError, UnicodeError, csv.Error): pass
         self.position_received=None;self.heading_received=None
         self.pub=node.create_publisher(String,'/trajectory/internal_result',10)
         node.create_subscription(String,'/trajectory/internal_request',self.handle,10)
@@ -60,10 +64,10 @@ class FollowerPathControl:
         node=self.node;action=req['action']
         result={'request_id':req['request_id'],'action':action,'ok':False}
         try:
-            if action=='remote':
+            if action in ('remote', 'select'):
                 node.drive_state=node.DS_ESTOP if node.abort_req else node.DS_PAUSED
                 node.publish_traj_cmd(0.0,0.0,0.0)
-                result.update(ok=True,code='OK',message='循迹已暂停')
+                result.update(ok=True,code='OK',message='循迹已暂停',path_version=self.version)
             elif action=='reload':
                 node.drive_state=node.DS_ESTOP if node.abort_req else node.DS_PAUSED
                 node.publish_traj_cmd(0.0,0.0,0.0)
@@ -96,7 +100,7 @@ class FollowerPathControl:
             else:
                 if node.abort_req or node.drive_state==node.DS_ESTOP:
                     raise ValueError('循迹节点存在中止锁存，请先处理保护条件')
-                if not self.version or req.get('path_version')!=self.version:
+                if not self.version or (req.get('path_version') is not None and req['path_version']!=self.version):
                     raise ValueError('路径版本不匹配，请先重新加载')
                 _,disk_version=load_snapshot(node.path_csv)
                 if disk_version!=self.version:raise ValueError('磁盘路径已更新，请重新加载')
@@ -179,7 +183,7 @@ class ExecutorPathControl:
                 return geofence_rejection(node.paused_reset_guards.get('围栏',(False,None)),
                     self.geofence_detail,self.geofence_received,time.monotonic())
             return reason
-        if not self.loaded_version or req.get('path_version')!=self.loaded_version:
+        if req.get('path_version') is not None and req['path_version']!=self.loaded_version:
             return '请先成功重载路径，并提供对应path_version'
         if (self.traj_received is None or time.monotonic()-self.traj_received>2
                 or node.cmd_traj is None or not node.cmd_traj.valid or not node._is_zero_cmd(node.cmd_traj)):
@@ -194,9 +198,11 @@ class ExecutorPathControl:
     def handle(self,msg):
         try:req=request_data(msg)
         except (ValueError,TypeError):return
+        if getattr(self.node,'can_maintenance',None) is not None and self.node.can_maintenance.active:
+            self.reply(req,False,'CAN_BUSY','CAN 恢复维护中，禁止操作路径');return
         if self.pending:
             self.reply(req,False,'TRAJECTORY_BUSY','另一条路径操作正在执行');return
-        if req['action']=='remote' and (self.node.estop_latched or self.node.abort_req):
+        if req['action'] in ('remote','select') and (self.node.estop_latched or self.node.abort_req):
             self.reply(req,False,'TRAJECTORY_START_REJECTED','急停或中止未解除');return
         if req['action']=='start':
             reason=self.start_rejection(req)
@@ -214,6 +220,9 @@ class ExecutorPathControl:
         if not isinstance(result,dict) or not self.pending:return
         req,_=self.pending
         if result.get('request_id')!=req['request_id'] or result.get('action')!=req['action']:return
+        if getattr(self.node,'can_maintenance',None) is not None and self.node.can_maintenance.active:
+            self.pending=None
+            self.reply(req,False,'CAN_BUSY','CAN 恢复维护中，路径操作已取消');return
         if not result.get('ok'):
             self.pending=None
             self.reply(req,False,result.get('code','PATH_CONTROL_FAILED'),result.get('message','路径操作失败'));return
@@ -225,18 +234,30 @@ class ExecutorPathControl:
                 node.drive_state=node.DS_RUNNING
             node.bale_active=False
             node._update_safety_state();node._update_control_mode()
-            self.reply(req,True,'OK','已切回遥控，速度和转角已清零')
+            self.reply(req,True,'OK','已切回遥控，速度和转角已清零',selected_mode='remote')
         elif req['action']=='reload':
             self.loaded_version=result['path_version'];self.pending=None
             node=self.node
             self.pause()
-            if not node.estop_latched and not node.abort_req:
-                node.drive_state=node.DS_RUNNING
+            node.teleop_active=False
             node.bale_active=False
+            self.drive.publish(UInt8(data=node.drive_state))
             node._update_safety_state();node._update_control_mode()
-            self.reply(req,True,'OK','路径已重载，已选择遥控并清零；急停状态保持',path_version=self.loaded_version,
-                waypoint_count=result['waypoint_count'],path_file=result.get('path_file',''))
+            self.reply(req,True,'OK',('路径加载成功，请按键g开始循迹' if not node.estop_latched and not node.abort_req else '路径加载成功，急停尚未解除，请先处理故障并复位'),path_version=self.loaded_version,
+                waypoint_count=result['waypoint_count'],path_file=result.get('path_file',''),
+                selected_mode='trajectory',ready_to_start=not node.estop_latched and not node.abort_req)
+        elif req['action']=='select':
+            self.pending=None
+            node=self.node
+            self.pause();node.teleop_active=False;node.bale_active=False
+            if result.get('path_version'):self.loaded_version=result['path_version']
+            self.drive.publish(UInt8(data=node.drive_state))
+            node._update_safety_state();node._update_control_mode()
+            self.reply(req,True,'OK','已切换循迹模式，请按键g开始循迹',path_version=self.loaded_version,
+                selected_mode='trajectory',ready_to_start=not node.estop_latched and not node.abort_req)
         else:
+            if self.loaded_version is None and result.get('path_version'):
+                self.loaded_version=result['path_version']
             reason=self.start_rejection(req)
             self.pending=None
             if reason:
@@ -268,12 +289,12 @@ class BridgePathClient:
     async def request(self,ws,data):
         rid=data.get('request_id',str(uuid.uuid4()));action=data.get('action')
         if action=='toggle':
-            action='start' if self.node.teleop_active else 'remote'
+            action='select' if self.node.teleop_active else 'remote'
             data=dict(data,action=action)
-            if action=='start' and not data.get('path_version'):
-                data['path_version']=getattr(self,'loaded_version',None)
+        if action=='start' and not data.get('path_version'):
+            data=dict(data,path_version=getattr(self,'loaded_version',None))
         base=dict(type='trajectory_result',request_id=rid,action=action)
-        if not isinstance(rid,str) or not 1<=len(rid)<=128 or action not in ('reload','start','remote'):
+        if not isinstance(rid,str) or not 1<=len(rid)<=128 or action not in ('reload','start','remote','select'):
             await ws.send(json.dumps(dict(base,ok=False,code='INVALID_REQUEST',message='无效路径请求'),ensure_ascii=False));return
         if self.pending:
             await ws.send(json.dumps(dict(base,ok=False,code='TRAJECTORY_BUSY',message='另一条路径操作正在执行'),ensure_ascii=False));return
@@ -285,8 +306,9 @@ class BridgePathClient:
             result=await asyncio.wait_for(future,10)
             if result.get('ok'):
                 self.node.zero_teleop();self.node.drive_state=result['drive_state']
-                self.node.teleop_active=action!='start'
-                if action=='reload':self.loaded_version=result.get('path_version')
+                self.node.teleop_active=action=='remote'
+                if result.get('path_version'):self.loaded_version=result['path_version']
+                self.node.publish_teleop_active()
         except asyncio.TimeoutError:
             result=dict(base,ok=False,code='TRAJECTORY_TIMEOUT',message='执行节点未回复，操作结果未确认')
         finally:self.pending.pop(rid,None)

@@ -43,6 +43,8 @@ class StatusTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def healthy(self):
+        self.node.can_bus_status = dict(state='ERROR-ACTIVE', interface_up=True)
+        self.node.can_bus_received = time.monotonic()
         self.node.fix_cb(Obj(status=Obj(status=0), latitude=29.0, longitude=119.0))
         self.node.heading_cb(Obj(data=90.0))
         self.node.lidar_cb(Obj(width=1, height=1, data=b'1234'))
@@ -71,6 +73,59 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(packet['device_state'],'ready')
         self.assertTrue(packet['execution_status']['fresh'])
         json.dumps(packet,allow_nan=False)
+
+    def test_busoff_overrides_fresh_ros_feedback(self):
+        self.ready()
+        self.node.can_bus_status = dict(state='BUS-OFF',interface_up=True,tx_error_counter=255,rx_error_counter=127)
+        self.node.check_once()
+        can=self.node.snapshot['peripherals']['can']
+        self.assertEqual(can['errors'][0]['code'],'CAN_BUS_OFF')
+        self.assertEqual(self.node.snapshot['device_state'],'runtime_fault')
+        self.assertIn('BUS-OFF',self.node.snapshot['device_message'])
+    def test_missing_host_service_is_not_reported_ready(self):
+        self.ready();self.node.start_time-=6
+        self.node.can_bus_received=time.monotonic()-3
+        self.node.check_once()
+        self.assertEqual(self.node.snapshot['peripherals']['can']['errors'][0]['code'],'CAN_BUS_STATUS_TIMEOUT')
+
+    def test_trajectory_network_warning_keeps_ready(self):
+        self.ready();self.node.link_ok=False;self.node.link_time=time.monotonic()
+        self.node.on_network_event(String(data=json.dumps(dict(action='warning',message='循迹网络断链，仅告警'))))
+        self.node.check_once()
+        self.assertEqual(self.node.snapshot['device_state'],'ready')
+        self.assertEqual(self.node.snapshot['vehicle_state'],'trajectory')
+        self.assertEqual(self.node.snapshot['network_status']['severity'],'warning')
+    def test_manual_network_reset_clears_only_matching_history(self):
+        self.ready();boot=self.node.snapshot['boot_id']
+        self.node.control.update(safety_state='ESTOP',estop_reason='network_disconnected',network_fault_id='f1')
+        self.node.check_once();self.assertEqual(self.node.snapshot['device_state'],'runtime_fault')
+        # Reconnection alone never clears the retained fault.
+        self.node.link_ok=True;self.node.link_time=time.monotonic()
+        self.node.check_once();self.assertEqual(self.node.snapshot['device_state'],'runtime_fault')
+        self.node.on_reset_result(String(data=json.dumps(dict(ok=True,request_id='reset1',cleared_reason='network_disconnected',cleared_network_event_id='f1'))))
+        self.node.control.update(safety_state='READY',drive_state=0,estop_reason='',network_fault_id=None,last_network_reset_request_id='reset1',last_network_reset_event_id='f1')
+        self.node.check_once()
+        self.assertEqual(self.node.snapshot['device_state'],'ready');self.assertEqual(self.node.snapshot['device_message'],'')
+        self.assertEqual(self.node.snapshot['boot_id'],boot);self.assertIn('acknowledged_fault',read())
+    def test_repeated_network_fault_can_be_acknowledged_by_current_reset(self):
+        self.ready();update('runtime_fault','车辆已急停/中止：network_heartbeat_timeout',fault_event_id='older')
+        self.node.link_ok=True;self.node.link_time=time.monotonic()
+        self.node.control.update(safety_state='READY',drive_state=0,estop_reason='',last_network_reset_request_id='reset-new',last_network_reset_event_id='newer')
+        self.node.on_reset_result(String(data=json.dumps(dict(ok=True,request_id='reset-new',cleared_reason='network_disconnected',cleared_network_event_id='newer'))))
+        self.node.check_once();self.assertEqual(self.node.snapshot['device_state'],'ready')
+    def test_stale_reset_ack_cannot_clear_new_fault(self):
+        self.ready();update('runtime_fault','车辆已急停/中止：network_disconnected',fault_event_id='newer')
+        self.node.link_ok=True;self.node.link_time=time.monotonic()
+        self.node.control.update(safety_state='READY',drive_state=0,estop_reason='',last_network_reset_request_id='reset-current',last_network_reset_event_id='current')
+        self.node.on_reset_result(String(data=json.dumps(dict(ok=True,request_id='stale-reset',cleared_reason='network_disconnected',cleared_network_event_id='older'))))
+        self.node.check_once();self.assertEqual(self.node.snapshot['device_state'],'runtime_fault')
+    def test_network_ack_cannot_clear_other_or_wrong_event_fault(self):
+        for message,event_id in [('CAN故障','f1'),('车辆已急停/中止：network_disconnected','different')]:
+            update('starting','',reset=True);update('runtime_fault',message,fault_event_id=event_id)
+            before=read()
+            ack=dict(boot_id=before['boot_id'],request_id='r',cleared_reason='network_disconnected',cleared_network_event_id='f1')
+            after=update('ready','',network_ack=ack)
+            self.assertEqual(after['device_state'],'runtime_fault');self.assertEqual(after['device_message'],message)
 
     def test_waiting_peripherals_and_startup_failure(self):
         self.node.check_once()

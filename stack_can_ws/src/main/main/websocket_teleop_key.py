@@ -16,6 +16,9 @@ from stack_msgs.msg import StackCommand
 import websockets
 from main.trajectory_control import BridgePathClient
 from main.camera_control import CameraControlClient
+from main.can_management import CanControlClient
+from main.device_control import DeviceControlClient
+from main.network_safety import ControlSessions, event_qos
 
 HELP = """
 websocket_teleop_bridge: WebSocket teleop + mode control
@@ -23,8 +26,7 @@ websocket_teleop_bridge: WebSocket teleop + mode control
 全局行驶状态 (/drive_cmd):
   x -> ESTOP (drive_cmd = 2)
   r -> RESET ESTOP / abort
-       行为: 先发布零速零角 teleop 命令，再请求 /reset_estop，
-            同时切回 RUN + 手动 teleop（但仍保持静止）
+       行为: 清零指令并请求安全复位；成功后保持PAUSE和手动模式，不自动RUN
   f -> TASK DONE (/task_done True)
   t -> TOGGLE 自动循迹 / 手动 teleop
        注意: t 不再负责退出 ESTOP
@@ -61,8 +63,15 @@ class WebSocketTeleopBridge(Node):
     def __init__(self):
         super().__init__('websocket_teleop_bridge')
         self.camera_control = CameraControlClient()
+        self.can_control = CanControlClient(self)
+        self.device_control = DeviceControlClient(self,self.can_control)
         self.trajectory_control = BridgePathClient(self)
         self.paused_reset_pending = {}
+        self.sessions = ControlSessions()
+        self.network_warning_latched = False
+        self.network_event_pending = None
+        self.pub_network_event = self.create_publisher(String, '/safety/network_event', event_qos())
+        self.create_subscription(String, '/safety/network_result', self.on_network_result, 10)
         self.pub_paused_reset = self.create_publisher(String, '/reset_estop_paused', 10)
         self.create_subscription(String, '/vehicle/reset_result', self._on_paused_reset_result, 10)
 
@@ -79,8 +88,8 @@ class WebSocketTeleopBridge(Node):
         self.pub_fault_text = self.create_publisher(String, '/network_fault_text', 10)
 
         # 内部状态
-        self.drive_state = 1
-        self.teleop_active = True
+        self.drive_state = 0 if os.environ.get('NAV_START_PAUSED','0') == '1' else 1
+        self.teleop_active = False
 
         self.pre_speed_kmh = 0.0
         self.angle_deg = 0.0
@@ -134,6 +143,14 @@ class WebSocketTeleopBridge(Node):
             result = json.loads(msg.data)
             if not isinstance(result, dict):
                 return
+            if result.get('ok'):
+                self.zero_teleop()
+                self.drive_state = 0
+                self.teleop_active = True
+                self.network_fault_latched = False
+                self.network_warning_latched = False
+                self.network_event_pending = None
+                self.pub_network_event.publish(String(data=json.dumps(dict(action='cleared', request_id=result.get('request_id')))))
             future = self.paused_reset_pending.get(result.get('request_id'))
             if future is not None and not future.done():
                 future.set_result(result)
@@ -229,27 +246,44 @@ class WebSocketTeleopBridge(Node):
     
     #统一的“网络故障触发abort”入口
     def trigger_network_abort(self, reason: str):
-        # 已经锁存过一次，就不要反复刷屏
-        if self.network_fault_latched:
+        # The executor owns the decision. Do not clear commands or publish /abort
+        # here: doing so would stop autonomous trajectory mode before arbitration.
+        if self.network_fault_latched or self.network_warning_latched or self.network_event_pending:
             return
-
-        self.network_fault_latched = True
-
-        # 为了避免锁存瞬间仍残留旧 teleop 命令，先清零再 abort
-        self.zero_teleop()
-        self.publish_teleop_cmd()
-
+        rid = 'network-' + uuid.uuid4().hex
+        code = 'network_heartbeat_timeout' if 'heartbeat timeout' in reason else 'network_disconnected'
         self.publish_link_ok(False)
-        self.publish_fault_text(f'NETWORK FAULT: {reason}')
-        if self.abort_on_disconnect:
-            self.publish_abort()
+        self.network_event_pending = (rid, time.monotonic(), reason)
+        self.pub_network_event.publish(String(data=json.dumps(dict(action='fault', request_id=rid, reason_code=code, detail=reason))))
+
+    def on_network_result(self, msg):
+        try:
+            result = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(result, dict) or not self.network_event_pending or result.get('request_id') != self.network_event_pending[0]:
+            return
+        self.network_event_pending = None
+        if result.get('action') == 'estop':
+            self.network_fault_latched = True
+            self.zero_teleop()
+            self.publish_teleop_cmd()
+            # Pause the follower without giving it an unrelated generic abort latch.
+            self.drive_state = 0
+            self.publish_drive_cmd()
+            self.publish_fault_text('NETWORK FAULT: ' + result.get('message', '') + '；' + result.get('detail', ''))
+        else:
+            self.network_warning_latched = not self.ws_connected
+            self.publish_fault_text('NETWORK WARNING: ' + result.get('message', '') + '；' + result.get('detail', ''))
 
     #链路恢复入口 
     def mark_link_restored(self, client_addr=None):
         self.ws_connected = True
+        self.network_warning_latched = False
         self.active_client_addr = client_addr
         self.last_rx_monotonic = time.monotonic()
         self.publish_link_ok(True)
+        self.pub_network_event.publish(String(data=json.dumps(dict(action='restored', request_id='restored-' + uuid.uuid4().hex))))
 
         # 注意：这里只报告恢复，不自动 clear abort
         if self.network_fault_latched:
@@ -262,6 +296,14 @@ class WebSocketTeleopBridge(Node):
     #看门狗链路
     def link_watchdog_loop(self):
         now = time.monotonic()
+        if self.network_event_pending and not self.ws_connected and now - self.network_event_pending[1] > 2.0:
+            # Missing executor acknowledgement is not proof of autonomous mode.
+            self.network_event_pending = None
+            self.network_fault_latched = True
+            self.zero_teleop();self.publish_teleop_cmd()
+            self.drive_state = 2;self.publish_drive_cmd()
+            self.publish_abort()
+            self.publish_fault_text('NETWORK FAULT: 执行器未确认断链处置，采取保守急停，需检查控制状态')
         self.publish_link_ok(self.ws_connected)
 
         # 没客户端连接，且之前不是故障状态时，不一定要强制 abort；
@@ -325,18 +367,14 @@ class WebSocketTeleopBridge(Node):
     def request_reset_estop(self):
         self.zero_teleop()
         self.publish_teleop_cmd()
-
         self.teleop_active = True
         self.publish_teleop_active()
-
-        self.drive_state = 1
-        self.publish_drive_cmd()
-        
-        self.network_fault_latched = False
-        self.publish_reset_estop()
+        self.pub_paused_reset.publish(String(data=json.dumps(dict(request_id='manual-' + uuid.uuid4().hex))))
 
     # ---------------- 按键语义 ----------------
     def handle_key(self, c: str):
+        if self.can_control.pending and c != 'x':
+            return
         if not c:
             return
         c = c.lower()
@@ -453,12 +491,11 @@ class WebSocketTeleopBridge(Node):
         client_addr = websocket.remote_address
         self.get_logger().info(f"Client connected from {client_addr}")
 
-        self.mark_link_restored(client_addr)
+        token = uuid.uuid4().hex
+        self.sessions.connect(token, time.monotonic())
 
         try:
             async for message in websocket:
-                self.last_rx_monotonic = time.monotonic()
-
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
@@ -466,6 +503,20 @@ class WebSocketTeleopBridge(Node):
                     continue
 
                 if not isinstance(data, dict):
+                    continue
+                claims = data.get('type') in ('cmd','drive','active','trajectory','reset_estop','reset_estop_paused','task_done') or 'key' in data
+                if self.sessions.message(token, time.monotonic(), claims=claims, heartbeat=data.get('type') == 'heartbeat', timeout=self.link_timeout_sec):
+                    if not self.ws_connected or self.active_client_addr != client_addr:
+                        self.mark_link_restored(client_addr)
+                    self.last_rx_monotonic = time.monotonic()
+                if data.get('type') == 'device':
+                    await self.device_control.submit(websocket,data)
+                    continue
+                if data.get('type') == 'can':
+                    await self.can_control.submit(websocket, data)
+                    continue
+                if self.can_control.pending and data.get('type') != 'heartbeat' and not (data.get('type') == 'drive' and data.get('state') == 2) and data.get('key') != 'x':
+                    await websocket.send(json.dumps(dict(type='device_result' if self.device_control.pending else 'can_result', ok=False, code='DEVICE_BUSY' if self.device_control.pending else 'CAN_BUSY', message='导航维护期间仅接受查询、心跳和急停'), ensure_ascii=False))
                     continue
                 if data.get('type') == 'trajectory':
                     asyncio.create_task(self.trajectory_control.request(websocket, data))
@@ -479,6 +530,9 @@ class WebSocketTeleopBridge(Node):
                 if data.get('type') == 'heartbeat':
                     continue
 
+                if ((data.get('type') == 'drive' and data.get('state') == 1) or data.get('key') == 'g') and not self.teleop_active:
+                    asyncio.create_task(self.trajectory_control.request(websocket, dict(data, action='start')))
+                    continue
                 if data.get('key') == 't':
                     asyncio.create_task(self.trajectory_control.request(websocket, dict(data, action='toggle')))
                     continue
@@ -505,7 +559,7 @@ class WebSocketTeleopBridge(Node):
 
                 if msg_type == 'reset_estop':
                     if self.debounce('reset_estop'):
-                        self.request_reset_estop()
+                        asyncio.create_task(self.request_paused_reset(websocket, dict(data, type='reset_estop_paused')))
                     continue
 
                 if msg_type == 'active':
@@ -550,17 +604,13 @@ class WebSocketTeleopBridge(Node):
                 self.get_logger().warn(f"Unknown message: {data}")
 
         except websockets.exceptions.ConnectionClosed:
-            self.ws_connected = False
-            self.get_logger().warn(f"Client {client_addr} disconnected")
-            self.trigger_network_abort(f'websocket disconnected: {client_addr}')
+            self.get_logger().warn(f'Client {client_addr} disconnected')
         except Exception as e:
-            self.ws_connected = False
-            self.get_logger().error(f"Unexpected error: {e}")
-            self.trigger_network_abort(f'websocket exception: {e}')
-
+            self.get_logger().error(f'WebSocket error: {e}')
         finally:
-            self.ws_connected = False
-            self.trigger_network_abort(f'websocket closed: {client_addr}')
+            if self.sessions.disconnect(token):
+                self.ws_connected = False
+                self.trigger_network_abort(f'websocket disconnected: {client_addr}')
 
     # ---------------- 本地键盘监听 ----------------
     async def keyboard_loop(self):
