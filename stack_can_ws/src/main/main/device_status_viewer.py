@@ -95,6 +95,8 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
     for key, name in [('rtk', 'RTK'), ('lidar', '激光雷达'), ('ultrasonic', '超声波'), ('can', 'CAN')]:
         item = snapshot.get('peripherals', {}).get(key, {})
         lines.append('{}：{}    数据年龄：{} ms'.format(name, label(item.get('state')), item.get('data_age_ms', '—')))
+        if key == 'rtk' and item.get('solution_label'):
+            lines.append('  定位解算：' + item['solution_label'])
         if key == 'can' and item.get('bus'):
             bus = item['bus']
             lines.append('  总线：{}  波特率：{}  错误计数 TX/RX：{}/{}  状态年龄：{} ms'.format(

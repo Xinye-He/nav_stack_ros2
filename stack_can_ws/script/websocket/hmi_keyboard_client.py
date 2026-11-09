@@ -200,6 +200,8 @@ def status_summary(data):
     for name, item in data.get('peripherals', {}).items():
         state = {'starting': '启动中', 'ready': '就绪', 'error': '错误'}.get(item.get('state'), '未知')
         errors = '；'.join(e.get('message', '') for e in item.get('errors', []))
+        if name == 'rtk' and item.get('solution_label'):
+            state += ' · ' + item['solution_label']
         peripherals.append(per_names.get(name, name) + ':' + state + ('(' + errors + ')' if errors else ''))
     return '{} | 模式:{} | {} | {}'.format(data.get('device_state_label') or state_names.get(data.get('device_state'), '未知'),
         mode_names.get(data.get('vehicle_state'), '未知'), ' '.join(peripherals), data.get('device_message', '')) + ((' | 网络警告：' + data['network_status'].get('message', '断链')) if data.get('network_status', {}).get('severity') == 'warning' else '')

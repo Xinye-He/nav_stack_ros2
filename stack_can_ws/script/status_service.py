@@ -23,6 +23,27 @@ from can_bus_status import enrich_can_status, poll_can_bus
 from network_status import summarize_network
 
 
+GGA_SOLUTIONS = {
+    0: ('no_fix', '无有效定位'),
+    1: ('standalone', '单点定位（未进入 RTK）'),
+    2: ('differential', '差分定位（DGNSS）'),
+    4: ('rtk_fixed', 'RTK 固定解'),
+    5: ('rtk_float', 'RTK 浮点解'),
+}
+
+def gga_quality(sentence):
+    body, sep, checksum = sentence.strip().partition('*')
+    fields = body.split(',')
+    if not sep or len(fields) < 7 or len(fields[0]) != 6 or not fields[0].startswith('$') or not fields[0].endswith('GGA'):
+        return None
+    check = 0
+    for char in body[1:]:
+        check ^= ord(char)
+    if checksum.upper() != f'{check:02X}' or not fields[6].isascii() or not fields[6].isdigit():
+        return None
+    return int(fields[6])
+
+
 class StatusService(StartupHealthCheck):
     def __init__(self, startup_timeout, runtime_timeout, obstacle_threshold=0.5, obstacle_warning_threshold=2.0):
         args = SimpleNamespace(node_name='device_status_monitor', check_fix=True, check_heading=True,
@@ -42,6 +63,8 @@ class StatusService(StartupHealthCheck):
         self.pending_network_ack = None
         self.control = {}
         self.control_time = None
+        self.gga_code = None
+        self.gga_time = None
         self.link_ok = False
         self.link_time = None
         self.driver_errors = {}
@@ -55,6 +78,7 @@ class StatusService(StartupHealthCheck):
         self.create_subscription(String, '/safety/network_result', self.on_network_event, 10)
         self.create_subscription(String, '/vehicle/reset_result', self.on_reset_result, 10)
         self.create_subscription(Log, '/rosout', self.on_log, 100)
+        self.create_subscription(String, '/nmea_sentence', self.on_nmea, 10)
         self.snapshot = {}
 
     def ultrasonic_cb(self, msg):
@@ -62,6 +86,12 @@ class StatusService(StartupHealthCheck):
         super().ultrasonic_cb(msg)
         self.obstacle_received = time.monotonic()
         self.obstacle_ranges = list(msg.data[:4]) if len(msg.data) >= 4 else None
+
+    def on_nmea(self, msg):
+        quality = gga_quality(msg.data)
+        if quality is not None:
+            self.gga_code = quality
+            self.gga_time = time.monotonic()
 
     def on_control(self, msg):
         try:
@@ -111,6 +141,12 @@ class StatusService(StartupHealthCheck):
         state = lifecycle['device_state']
         grace = now - self.start_time < self.args.startup_timeout
         peripherals = self.peripheral_status(self.args.runtime_timeout, grace)
+        age = None if self.gga_time is None else now - self.gga_time
+        code = self.gga_code if age is not None and age <= self.args.runtime_timeout else None
+        solution, label = GGA_SOLUTIONS.get(code, ('unknown', '定位解算未知'))
+        peripherals['rtk'].update(fix_quality=code, solution=solution,
+                                  solution_label=label,
+                                  solution_age_ms=None if age is None else int(age * 1000))
         for component, item in peripherals.items():
             if item['state'] == 'ready':
                 self.driver_errors.pop(component, None)
