@@ -92,6 +92,39 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
     else:
         lines.append('执行器实时状态：等待数据/超时')
     lines.append('-' * 58)
+    bale = snapshot.get('bale_status') or {}
+    if not bale.get('fresh'):
+        lines.append('草捆捡拾：状态不可用/超时')
+    else:
+        if bale.get('retreat_limit_reached'):
+            phase = '后退2秒完成；目标仍过近或无效，停车等待距离恢复，捡拾任务继续'
+        elif bale.get('waiting_for_retry'):
+            phase = '10秒未检测到草捆，按 f 跳过 / 按 3 重试'
+        elif bale.get('pick_active'):
+            phase = '捡拾执行中'
+        elif bale.get('aligned'):
+            phase = '三次对准确认完成'
+        elif bale.get('align_confirm_count', 0):
+            phase = '第 {} 次对准确认完成'.format(bale['align_confirm_count'])
+        elif bale.get('active'):
+            phase = '草捆控制器已激活，正在对准或靠近'
+        elif bale.get('at_task_waiting'):
+            phase = '已进入捡拾点，等待草捆控制'
+        else:
+            phase = '未进入捡拾点'
+        lines.append('草捆捡拾：' + phase)
+        lines.append('  对准确认：{}/3'.format(bale.get('align_confirm_count', 0)))
+        current_execution = snapshot.get('execution_status') or {}
+        mode = current_execution.get('control_mode') if current_execution.get('fresh') else None
+        lines.append('  执行器草捆接管：' + ('已进入 BALE' if mode == 'BALE' else ('未进入（当前 {}）'.format(mode) if mode else '状态不可用')))
+        if bale.get('target_valid') and isinstance(bale.get('target_age_s'), (int, float)) and bale['target_age_s'] <= bale.get('target_timeout_s', 0.5):
+            dist, angle = bale.get('distance_m'), bale.get('raw_angle_deg')
+            if isinstance(dist, (int, float)) and isinstance(angle, (int, float)):
+                lines.append('  识别草捆：距离 {:.2f} m，角度 {:+.1f}°（右正左负）'.format(dist, angle))
+        else:
+            lines.append('  当前无新鲜有效草捆目标')
+        if bale.get('blocking_reasons'):
+            lines.append('  未就绪原因：' + ', '.join(bale['blocking_reasons']))
     for key, name in [('rtk', 'RTK'), ('lidar', '激光雷达'), ('ultrasonic', '超声波'), ('can', 'CAN')]:
         item = snapshot.get('peripherals', {}).get(key, {})
         lines.append('{}：{}    数据年龄：{} ms'.format(name, label(item.get('state')), item.get('data_age_ms', '—')))

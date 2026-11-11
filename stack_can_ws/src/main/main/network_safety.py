@@ -45,7 +45,9 @@ def fault_action(node):
     teleop = node.teleop_active and node.cmd_teleop is not None and node.cmd_teleop.valid
     bale = node.bale_active and node.cmd_bale is not None and node.cmd_bale.valid
     trajectory = node.cmd_traj is not None and node.cmd_traj.valid
-    if not teleop and not bale and trajectory:
+    if not teleop and bale:
+        return 'warning', '草捆自动控制时上位机断链，仅告警，草捆控制继续运行'
+    if not teleop and trajectory:
         return 'warning', '循迹模式网络断链，仅告警，循迹继续运行'
     if teleop and node.teleop_source == 'keyboard':
         return 'warning', '本地键盘控制，网络断链仅告警'
@@ -53,7 +55,9 @@ def fault_action(node):
         return 'neutral', '9010遥控网络断链，车辆进入Neutral；连接恢复后恢复遥控，旧运动指令已清零'
     if node.drive_state == node.DS_PAUSED:
         return 'warning', '车辆已暂停，网络断链仅告警'
-    return 'estop', '控制状态未明确确认为循迹，按断链急停处理'
+    if not teleop:
+        return 'warning', '非上位机遥控状态，网络断链仅告警'
+    return 'estop', '遥控命令来源不明，按断链急停处理'
 
 
 class ExecutorNetworkSafety:

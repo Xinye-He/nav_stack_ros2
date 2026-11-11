@@ -63,6 +63,8 @@ class StatusService(StartupHealthCheck):
         self.pending_network_ack = None
         self.control = {}
         self.control_time = None
+        self.bale_status = None
+        self.bale_status_time = None
         self.gga_code = None
         self.gga_time = None
         self.link_ok = False
@@ -74,6 +76,7 @@ class StatusService(StartupHealthCheck):
         super().__init__(args)
         self.reset_guard_pub = self.create_publisher(Bool, '/safety/reset_peripherals_ready', 10)
         self.create_subscription(String, '/vehicle/execution_status', self.on_control, 10)
+        self.create_subscription(String, '/bale_controller/status', self.on_bale_status, 10)
         self.create_subscription(Bool, '/network_link_ok', self.on_link, 10)
         self.create_subscription(String, '/safety/network_result', self.on_network_event, 10)
         self.create_subscription(String, '/vehicle/reset_result', self.on_reset_result, 10)
@@ -92,6 +95,15 @@ class StatusService(StartupHealthCheck):
         if quality is not None:
             self.gga_code = quality
             self.gga_time = time.monotonic()
+
+    def on_bale_status(self, msg):
+        try:
+            value = json.loads(msg.data)
+            if isinstance(value, dict):
+                self.bale_status = value
+                self.bale_status_time = time.monotonic()
+        except (ValueError, TypeError):
+            pass
 
     def on_control(self, msg):
         try:
@@ -214,6 +226,7 @@ class StatusService(StartupHealthCheck):
         self.diagnostics.set_boot(lifecycle['boot_id'])
         emergency = fault_presentation(self.control, control_fresh, self.diagnostics.snapshot()['events'])
         self.snapshot = {'emergency_status': emergency,
+            'bale_status': dict(self.bale_status or {}, fresh=self.bale_status_time is not None and now - self.bale_status_time <= 2.0),
             'device_state_label': ('紧急触发' if emergency['code'] == 'drive_cmd' else emergency['message']) if emergency['active'] else {'runtime_fault': '运行故障：'+lifecycle.get('device_message', ''), 'ready': '就绪', 'starting': '启动中', 'startup_failed': '启动失败：'+lifecycle.get('device_message', '')}.get(state, state),
             'type': 'device_status', 'version': 1,
             'boot_id': lifecycle['boot_id'], 'device_state': state,

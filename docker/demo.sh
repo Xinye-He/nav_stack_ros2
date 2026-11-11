@@ -130,10 +130,17 @@ docker run --runtime nvidia "${DOCKER_TERMINAL_ARGS[@]}" --rm \
         fi
       fi
 
+      if [ -f "$ROS_WS/script/run_recording.sh" ]; then
+        source "$ROS_WS/script/run_recording.sh"
+        nav_record_start || echo "[recording] 无法启动记录，导航继续启动" >&2
+      fi
+      NAV_STARTUP_LOG="${NAV_STARTUP_LOG:-/tmp/docker_startup.log}"
+      NAV_DEVICE_LOG="${NAV_DEVICE_LOG:-/tmp/device_status.log}"
+
       export NAV_STATUS_FILE="/tmp/nav_device_status.json"
       python3 "$ROS_WS/script/status_store.py" starting "正在启动外设" --reset
       rm -f "$NAV_STATUS_FILE.ready"
-      nohup python3 "$ROS_WS/script/status_service.py" > /tmp/device_status.log 2>&1 &
+      nohup python3 "$ROS_WS/script/status_service.py" > "$NAV_DEVICE_LOG" 2>&1 &
       STATUS_PID=$!
       for attempt in {1..50}; do
         if [ -f "$NAV_STATUS_FILE.ready" ]; then break; fi
@@ -141,8 +148,8 @@ docker run --runtime nvidia "${DOCKER_TERMINAL_ARGS[@]}" --rm \
         sleep 0.1
       done
       if [ ! -f "$NAV_STATUS_FILE.ready" ] || ! kill -0 "$STATUS_PID" 2>/dev/null; then
-        echo "[container] 状态服务启动失败，请查看 /tmp/device_status.log"
-        cat /tmp/device_status.log
+        echo "[container] 状态服务启动失败，请查看 $NAV_DEVICE_LOG"
+        cat "$NAV_DEVICE_LOG"
         if [ "${DEMO_NONINTERACTIVE:-0}" = "1" ]; then exit 1; fi
         exec bash
       fi
@@ -150,9 +157,9 @@ docker run --runtime nvidia "${DOCKER_TERMINAL_ARGS[@]}" --rm \
       START_DOCKER_STARTUP="${START_DOCKER_STARTUP:-true}"
       if [ "$START_DOCKER_STARTUP" = "true" ]; then
         echo "[container] start docker_startup.launch.py in background ..."
-        nohup ros2 launch main docker_startup.launch.py > /tmp/docker_startup.log 2>&1 &
+        nohup ros2 launch main docker_startup.launch.py > "$NAV_STARTUP_LOG" 2>&1 &
         STARTUP_PID=$!
-        echo "[container] docker_startup.launch.py 已启动 (PID: $STARTUP_PID)，日志: /tmp/docker_startup.log"
+        echo "[container] docker_startup.launch.py 已启动 (PID: $STARTUP_PID)，日志: $NAV_STARTUP_LOG"
         sleep 1
       fi
 

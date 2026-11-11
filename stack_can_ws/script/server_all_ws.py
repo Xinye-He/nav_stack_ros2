@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import pathlib
+import time
 from typing import Optional
 
 import rclpy
@@ -40,7 +41,9 @@ HEADING_WS_PORT = 9003
 TELEOP_WS_PORT = 9010
 
 GPS_TOPIC = "/fix"
+CENTER_RAW_TOPIC = "/fix_center_raw"
 HEADING_TOPIC = "/heading_deg"
+VEHICLE_HEADING_TOPIC = "/vehicle_heading_deg"
 
 SAVE_DIR = pathlib.Path("/root/stack_can_ws/data")
 
@@ -77,6 +80,8 @@ class VehicleDataWebSocketNode(Node):
             self.gps_callback,
             qos
         )
+        self.center_raw_sub = self.create_subscription(
+            NavSatFix, CENTER_RAW_TOPIC, self.center_raw_callback, qos)
 
         self.heading_sub = self.create_subscription(
             Float32,
@@ -84,9 +89,15 @@ class VehicleDataWebSocketNode(Node):
             self.heading_callback,
             qos
         )
+        self.vehicle_heading_sub = self.create_subscription(
+            Float32, VEHICLE_HEADING_TOPIC, self.vehicle_heading_callback, qos)
 
         self.latest_gps = None
+        self.latest_center_raw = None
+        self.center_raw_received = None
         self.latest_heading = None
+        self.latest_vehicle_heading = None
+        self.vehicle_heading_received = None
 
         self.gps_clients = set()
         self.heading_clients = set()
@@ -116,6 +127,28 @@ class VehicleDataWebSocketNode(Node):
 
     def heading_callback(self, msg: Float32):
         self.latest_heading = float(msg.data)
+
+    def vehicle_heading_callback(self, msg: Float32):
+        heading = float(msg.data)
+        if not math.isfinite(heading):
+            self.latest_vehicle_heading = None
+            self.vehicle_heading_received = None
+            return
+        self.latest_vehicle_heading = heading
+        self.vehicle_heading_received = time.monotonic()
+
+    def center_raw_callback(self, msg: NavSatFix):
+        if msg.status.status < 0 or not math.isfinite(msg.latitude) or not math.isfinite(msg.longitude):
+            self.latest_center_raw = None
+            self.center_raw_received = None
+            return
+        self.latest_center_raw = {
+            'latitude': msg.latitude, 'longitude': msg.longitude,
+            'altitude': msg.altitude if math.isfinite(msg.altitude) else None,
+            'status': msg.status.status, 'stamp_sec': msg.header.stamp.sec,
+            'stamp_nsec': msg.header.stamp.nanosec,
+        }
+        self.center_raw_received = time.monotonic()
 
 
 # =========================
@@ -166,7 +199,14 @@ async def gps_ws_handler(websocket, path=None):
 async def broadcast_gps(node: VehicleDataWebSocketNode):
     while rclpy.ok():
         if node.latest_gps is not None and node.gps_clients:
-            message = json.dumps(node.latest_gps)
+            data = dict(node.latest_gps)
+            data['fix_center_raw'] = (node.latest_center_raw
+                if node.center_raw_received is not None and
+                time.monotonic() - node.center_raw_received <= 2.0 else None)
+            data['vehicle_heading_deg'] = (node.latest_vehicle_heading
+                if node.vehicle_heading_received is not None and
+                time.monotonic() - node.vehicle_heading_received <= 2.0 else None)
+            message = json.dumps(data)
             disconnected = set()
 
             for client in list(node.gps_clients):

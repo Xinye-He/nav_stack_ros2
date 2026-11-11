@@ -83,6 +83,7 @@ class WebSocketTeleopBridge(Node):
         # 发布者
         self.pub_drive_cmd = self.create_publisher(UInt8, '/drive_cmd', 1)
         self.pub_task_done = self.create_publisher(Bool, '/task_done', 1)
+        self.pub_bale_retry = self.create_publisher(Bool, '/bale/retry', 10)
         self.pub_teleop_act = self.create_publisher(Bool, '/teleop_active', 1)
         self.pub_teleop_cmd = self.create_publisher(StackCommand, '/stack_cmd/websocket', 1)
         self.pub_local_cmd = self.create_publisher(StackCommand, '/stack_cmd/teleop', 1)
@@ -313,13 +314,12 @@ class WebSocketTeleopBridge(Node):
     def link_watchdog_loop(self):
         now = time.monotonic()
         if self.network_event_pending and not self.ws_connected and now - self.network_event_pending[1] > 2.0:
-            # No acknowledgement: stop with PAUSE and warn, never convert a link loss to abort.
+            # Restrict the disconnected operator's command without changing autonomous drive state.
             self.network_event_pending = None
             self.network_neutral = True
             self.network_warning_latched = True
             self.zero_teleop();self.publish_teleop_cmd()
-            self.drive_state = 0;self.publish_drive_cmd()
-            self.publish_fault_text('NETWORK WARNING: 执行器未确认断链处置，已请求Neutral，等待连接恢复')
+            self.publish_fault_text('NETWORK WARNING: 执行器未确认断链处置，已清零上位机指令；自动控制不受该警告打断')
         self.publish_link_ok(self.ws_connected)
 
         # 没客户端连接，且之前不是故障状态时，不一定要强制 abort；
@@ -570,6 +570,10 @@ class WebSocketTeleopBridge(Node):
                     continue
                 if data.get('type') == 'rtk_drift':
                     asyncio.create_task(self.calibrate_rtk(websocket, data))
+                    continue
+                if data.get('type') == 'bale_retry':
+                    self.pub_bale_retry.publish(Bool(data=True))
+                    await websocket.send(json.dumps(dict(type='bale_retry_result', message='已发送重试请求，请查看捡拾状态确认'), ensure_ascii=False))
                     continue
                 if data.get('type') == 'trajectory':
                     asyncio.create_task(self.trajectory_control.request(websocket, data))

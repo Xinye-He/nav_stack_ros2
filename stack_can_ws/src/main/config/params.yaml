@@ -160,10 +160,11 @@ bale_align_controller:
 
     too_close_dist_m: 1.0
     retreat_speed_kmh: 4.0
+    retreat_max_duration_s: 2.0
 
     min_dist_m: 0.0
     max_dist_m: 15.0
-    target_timeout_s: 0.50
+    target_timeout_s: 1.0
 
     pick_action_hold_s: 20.0
 
