@@ -141,6 +141,31 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
             lines.append('  总线：{}  波特率：{}  错误计数 TX/RX：{}/{}  状态年龄：{} ms'.format(
                 bus.get('state', '未知'), bus.get('bitrate', '—'), bus.get('tx_error_counter', '—'),
                 bus.get('rx_error_counter', '—'), bus.get('status_age_ms', '—')))
+        if key == 'can':
+            motor_rpm = snapshot.get('motor_rpm') or {}
+            average_rpm = motor_rpm.get('average_rpm')
+            if motor_rpm.get('fresh') and isinstance(average_rpm, (int, float)):
+                sides = []
+                for label_text, field in (('左', 'left_rpm'), ('右', 'right_rpm')):
+                    value = motor_rpm.get(field)
+                    if isinstance(value, (int, float)):
+                        sides.append('{} {:.0f} rpm'.format(label_text, value))
+                lines.append('  电机转速：{:.0f} rpm{}'.format(
+                    average_rpm, ('（' + '，'.join(sides) + '）') if sides else ''))
+            else:
+                lines.append('  电机转速：无有效 CAN 数据')
+            battery = snapshot.get('battery') or {}
+            voltage = battery.get('voltage_v')
+            if battery.get('fresh') and isinstance(voltage, (int, float)):
+                sides = []
+                for label_text, field in (('左', 'left_voltage_v'), ('右', 'right_voltage_v')):
+                    value = battery.get(field)
+                    if isinstance(value, (int, float)):
+                        sides.append('{} {:.1f} V'.format(label_text, value))
+                lines.append('  电池电压：{:.1f} V{}'.format(
+                    voltage, ('（' + '，'.join(sides) + '）') if sides else ''))
+            else:
+                lines.append('  电池电压：无有效 CAN 数据')
         for error in item.get('errors', []):
             lines.append('  {}：{}'.format(error.get('code', ''), error.get('message', '')))
     obstacle = snapshot.get('obstacle_warning', {})

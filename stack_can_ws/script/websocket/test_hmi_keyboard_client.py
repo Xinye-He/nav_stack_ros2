@@ -9,6 +9,17 @@ from unittest.mock import patch
 
 import hmi_keyboard_client as hmi
 
+class StatusDisplayTests(unittest.TestCase):
+    def test_battery_voltage_summary(self):
+        data = {'device_state': 'ready', 'vehicle_state': None, 'peripherals': {},
+                'battery': {'fresh': True, 'voltage_v': 51.2,
+                            'left_voltage_v': 51.1, 'right_voltage_v': 51.3}}
+        self.assertIn('电池:51.2V（左51.1V / 右51.3V）', hmi.status_summary(data))
+
+    def test_battery_not_available_summary(self):
+        self.assertEqual(hmi.battery_summary({}), '电池:无有效CAN电压')
+
+
 class MappingTests(unittest.TestCase):
     def test_restart_confirmation_and_results(self):
         for work_only in (True, False):

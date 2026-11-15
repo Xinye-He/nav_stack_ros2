@@ -118,6 +118,10 @@ can_feedback_node:
     feedback_topic: "/stack_can/feedback"
     ground_speed_topic: "/ground_speed_mps"
     yaw_rate_topic: "/wheel_yaw_rate_rad_s"
+    # 电池电压来自电机报文 byte5/byte6：little-endian，0.1 V/bit
+    left_battery_voltage_topic: "/can/left_battery_voltage_v"
+    right_battery_voltage_topic: "/can/right_battery_voltage_v"
+    battery_voltage_topic: "/can/battery_voltage_v"
 
 motor_protection_node:
   ros__parameters:

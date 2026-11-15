@@ -194,6 +194,20 @@ def connect_api():
         raise RuntimeError('缺少 websockets，请运行：python3 -m pip install websockets')
 
 
+def battery_summary(battery):
+    if not isinstance(battery, dict) or not battery.get('fresh'):
+        return '电池:无有效CAN电压'
+    voltage = battery.get('voltage_v')
+    if not isinstance(voltage, (int, float)):
+        return '电池:无有效CAN电压'
+    sides = []
+    for label, key in (('左', 'left_voltage_v'), ('右', 'right_voltage_v')):
+        value = battery.get(key)
+        if isinstance(value, (int, float)):
+            sides.append(label + '{:.1f}V'.format(value))
+    return '电池:{:.1f}V'.format(voltage) + (('（' + ' / '.join(sides) + '）') if sides else '')
+
+
 def status_summary(data):
     state_names = {'starting': '启动中', 'startup_failed': '启动失败', 'ready': '就绪', 'runtime_fault': '运行故障'}
     mode_names = {'Neutral': 'Neutral', 'trajectory': '循迹中', 'remote': '9010遥控模式', None: '空'}
@@ -205,8 +219,8 @@ def status_summary(data):
         if name == 'rtk' and item.get('solution_label'):
             state += ' · ' + item['solution_label']
         peripherals.append(per_names.get(name, name) + ':' + state + ('(' + errors + ')' if errors else ''))
-    return '{} | 模式:{} | {} | {}'.format(data.get('device_state_label') or state_names.get(data.get('device_state'), '未知'),
-        mode_names.get(data.get('vehicle_state'), '未知'), ' '.join(peripherals), data.get('device_message', '')) + ((' | 网络警告：' + data['network_status'].get('message', '断链')) if data.get('network_status', {}).get('severity') == 'warning' else '')
+    return '{} | 模式:{} | {} | {} | {}'.format(data.get('device_state_label') or state_names.get(data.get('device_state'), '未知'),
+        mode_names.get(data.get('vehicle_state'), '未知'), ' '.join(peripherals), battery_summary(data.get('battery')), data.get('device_message', '')) + ((' | 网络警告：' + data['network_status'].get('message', '断链')) if data.get('network_status', {}).get('severity') == 'warning' else '')
 
 
 async def receive_status(args, connect):

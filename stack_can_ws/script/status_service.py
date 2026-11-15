@@ -92,7 +92,28 @@ class StatusService(StartupHealthCheck):
         self.create_subscription(String, '/vehicle/reset_result', self.on_reset_result, 10)
         self.create_subscription(Log, '/rosout', self.on_log, 100)
         self.create_subscription(String, '/nmea_sentence', self.on_nmea, 10)
+        self.battery = {'left_voltage_v': None, 'right_voltage_v': None, 'voltage_v': None, 'fresh': False}
+        self.motor_rpm = {'left_rpm': None, 'right_rpm': None, 'average_rpm': None, 'fresh': False}
         self.snapshot = {}
+
+    def can_feedback_cb(self, msg):
+        super().can_feedback_cb(msg)
+        left_valid = bool(getattr(msg, 'battery_left_valid', False))
+        right_valid = bool(getattr(msg, 'battery_right_valid', False))
+        left = float(getattr(msg, 'left_battery_voltage_v', 0.0)) if left_valid else None
+        right = float(getattr(msg, 'right_battery_voltage_v', 0.0)) if right_valid else None
+        values = [value for value in (left, right) if value is not None and math.isfinite(value)]
+        self.battery = {'left_voltage_v': left, 'right_voltage_v': right,
+                        'voltage_v': (sum(values) / len(values)) if values else None,
+                        'fresh': bool(values)}
+        left_rpm_valid = bool(getattr(msg, 'rpm_left_valid', False))
+        right_rpm_valid = bool(getattr(msg, 'rpm_right_valid', False))
+        left_rpm = float(getattr(msg, 'left_motor_rpm', 0.0)) if left_rpm_valid else None
+        right_rpm = float(getattr(msg, 'right_motor_rpm', 0.0)) if right_rpm_valid else None
+        rpm_values = [value for value in (left_rpm, right_rpm) if value is not None and math.isfinite(value)]
+        self.motor_rpm = {'left_rpm': left_rpm, 'right_rpm': right_rpm,
+                          'average_rpm': (sum(rpm_values) / len(rpm_values)) if rpm_values else None,
+                          'fresh': bool(rpm_values)}
 
     def ultrasonic_cb(self, msg):
         # Parent callback assesses data availability only. Distance never enters health faults.
@@ -291,7 +312,9 @@ class StatusService(StartupHealthCheck):
                 self.link_time is not None and now - self.link_time < 1.5, self.network_event),
             'diagnostics': self.diagnostics.snapshot(),
             'execution_status': dict(self.control, fresh=control_fresh),
-            'obstacle_warning': obstacle}
+            'obstacle_warning': obstacle,
+            'battery': dict(self.battery),
+            'motor_rpm': dict(self.motor_rpm)}
 
     def packet(self):
         if not self.snapshot:

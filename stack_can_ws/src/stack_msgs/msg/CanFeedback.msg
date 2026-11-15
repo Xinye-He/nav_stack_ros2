@@ -4,6 +4,8 @@ bool rpm_left_valid
 bool rpm_right_valid
 bool throttle_left_valid
 bool throttle_right_valid
+bool battery_left_valid
+bool battery_right_valid
 
 uint32 left_rpm_id
 uint32 right_rpm_id
@@ -18,6 +20,10 @@ float32 left_wheel_speed_mps
 float32 right_wheel_speed_mps
 float32 ground_speed_mps
 float32 yaw_rate_rad_s
+
+float32 left_battery_voltage_v
+float32 right_battery_voltage_v
+float32 battery_voltage_v
 
 uint8 left_throttle_raw
 uint8 right_throttle_raw

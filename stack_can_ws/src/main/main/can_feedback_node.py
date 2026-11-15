@@ -55,6 +55,9 @@ class CanFeedbackNode(Node):
         self.declare_parameter('right_throttle_topic', '/can/right_throttle_v')
         self.declare_parameter('left_can_control_topic', '/can/left_can_control')
         self.declare_parameter('right_can_control_topic', '/can/right_can_control')
+        self.declare_parameter('left_battery_voltage_topic', '/can/left_battery_voltage_v')
+        self.declare_parameter('right_battery_voltage_topic', '/can/right_battery_voltage_v')
+        self.declare_parameter('battery_voltage_topic', '/can/battery_voltage_v')
 
         self.enable_can = bool(self.get_parameter('enable_can').value)
         self.can_interface = self.get_parameter('can_interface').value
@@ -87,6 +90,9 @@ class CanFeedbackNode(Node):
         self.pub_right_throttle = self.create_publisher(Float32, self.get_parameter('right_throttle_topic').value, 10)
         self.pub_left_can_control = self.create_publisher(Bool, self.get_parameter('left_can_control_topic').value, 10)
         self.pub_right_can_control = self.create_publisher(Bool, self.get_parameter('right_can_control_topic').value, 10)
+        self.pub_left_battery_voltage = self.create_publisher(Float32, self.get_parameter('left_battery_voltage_topic').value, 10)
+        self.pub_right_battery_voltage = self.create_publisher(Float32, self.get_parameter('right_battery_voltage_topic').value, 10)
+        self.pub_battery_voltage = self.create_publisher(Float32, self.get_parameter('battery_voltage_topic').value, 10)
 
         self.can_bus = None
         if self.enable_can:
@@ -110,11 +116,15 @@ class CanFeedbackNode(Node):
         self.right_throttle_raw: Optional[int] = None
         self.left_control_mode: Optional[int] = None
         self.right_control_mode: Optional[int] = None
+        self.left_battery_voltage_v: Optional[float] = None
+        self.right_battery_voltage_v: Optional[float] = None
 
         self.t_left_rpm: Optional[float] = None
         self.t_right_rpm: Optional[float] = None
         self.t_left_throttle: Optional[float] = None
         self.t_right_throttle: Optional[float] = None
+        self.t_left_battery: Optional[float] = None
+        self.t_right_battery: Optional[float] = None
 
         period = 1.0 / max(1.0, publish_rate_hz)
         self.create_timer(period, self.on_timer)
@@ -150,14 +160,22 @@ class CanFeedbackNode(Node):
 
             if can_id == self.left_rpm_id:
                 rpm = self.decode_rpm(data)
+                voltage = self.decode_battery_voltage(data)
                 if rpm is not None:
                     self.left_motor_rpm = rpm
                     self.t_left_rpm = now_sec
+                if voltage is not None:
+                    self.left_battery_voltage_v = voltage
+                    self.t_left_battery = now_sec
             elif can_id == self.right_rpm_id:
                 rpm = self.decode_rpm(data)
+                voltage = self.decode_battery_voltage(data)
                 if rpm is not None:
                     self.right_motor_rpm = rpm
                     self.t_right_rpm = now_sec
+                if voltage is not None:
+                    self.right_battery_voltage_v = voltage
+                    self.t_right_battery = now_sec
             elif can_id == self.left_throttle_id:
                 parsed = self.decode_throttle(data)
                 if parsed is not None:
@@ -174,6 +192,14 @@ class CanFeedbackNode(Node):
         if len(data) < 2:
             return None
         return float(int(data[0]) + int(data[1]) * 256)
+
+    @staticmethod
+    def decode_battery_voltage(data: bytes) -> Optional[float]:
+        # CAN bytes 5 and 6: little-endian battery voltage, 0.1 V/bit, 0--80 V.
+        if len(data) < 6:
+            return None
+        raw = int(data[4]) + int(data[5]) * 256
+        return float(raw) / 10.0 if raw <= 800 else None
 
     @staticmethod
     def decode_throttle(data: bytes) -> Optional[Tuple[int, int]]:
@@ -201,6 +227,8 @@ class CanFeedbackNode(Node):
         rpm_right_valid = self.valid_since(self.t_right_rpm, now_sec)
         throttle_left_valid = self.valid_since(self.t_left_throttle, now_sec)
         throttle_right_valid = self.valid_since(self.t_right_throttle, now_sec)
+        battery_left_valid = self.valid_since(self.t_left_battery, now_sec)
+        battery_right_valid = self.valid_since(self.t_right_battery, now_sec)
 
         left_rpm = self.left_motor_rpm if rpm_left_valid and self.left_motor_rpm is not None else 0.0
         right_rpm = self.right_motor_rpm if rpm_right_valid and self.right_motor_rpm is not None else 0.0
@@ -221,6 +249,10 @@ class CanFeedbackNode(Node):
             avg_motor_rpm = 0.0
 
         yaw_rate_rad_s = (right_mps - left_mps) / self.wheel_track_m if (rpm_left_valid and rpm_right_valid) else 0.0
+        voltages = [value for value, valid in ((self.left_battery_voltage_v, battery_left_valid),
+                                               (self.right_battery_voltage_v, battery_right_valid))
+                    if valid and value is not None]
+        battery_voltage_v = sum(voltages) / len(voltages) if voltages else 0.0
 
         feedback = CanFeedback()
         feedback.stamp = now.to_msg()
@@ -228,6 +260,8 @@ class CanFeedbackNode(Node):
         feedback.rpm_right_valid = rpm_right_valid
         feedback.throttle_left_valid = throttle_left_valid
         feedback.throttle_right_valid = throttle_right_valid
+        feedback.battery_left_valid = battery_left_valid
+        feedback.battery_right_valid = battery_right_valid
         feedback.left_rpm_id = self.left_rpm_id
         feedback.right_rpm_id = self.right_rpm_id
         feedback.left_throttle_id = self.left_throttle_id
@@ -239,6 +273,9 @@ class CanFeedbackNode(Node):
         feedback.right_wheel_speed_mps = float(right_mps)
         feedback.ground_speed_mps = float(ground_speed_mps)
         feedback.yaw_rate_rad_s = float(yaw_rate_rad_s)
+        feedback.left_battery_voltage_v = float(self.left_battery_voltage_v or 0.0) if battery_left_valid else 0.0
+        feedback.right_battery_voltage_v = float(self.right_battery_voltage_v or 0.0) if battery_right_valid else 0.0
+        feedback.battery_voltage_v = float(battery_voltage_v)
         feedback.left_throttle_raw = int(self.left_throttle_raw or 0)
         feedback.right_throttle_raw = int(self.right_throttle_raw or 0)
         feedback.left_throttle_v = self.throttle_raw_to_v(self.left_throttle_raw) if throttle_left_valid else 0.0
@@ -273,6 +310,18 @@ class CanFeedbackNode(Node):
         msg = Float32()
         msg.data = feedback.right_throttle_v
         self.pub_right_throttle.publish(msg)
+
+        msg = Float32()
+        msg.data = feedback.left_battery_voltage_v
+        self.pub_left_battery_voltage.publish(msg)
+
+        msg = Float32()
+        msg.data = feedback.right_battery_voltage_v
+        self.pub_right_battery_voltage.publish(msg)
+
+        msg = Float32()
+        msg.data = feedback.battery_voltage_v
+        self.pub_battery_voltage.publish(msg)
 
         bmsg = Bool()
         bmsg.data = feedback.left_can_control
