@@ -74,6 +74,11 @@ def fault_summary(snapshot):
 def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=False):
     fresh = snapshot is not None and age <= 3.0
     state = snapshot.get('device_state_label', label(snapshot.get('device_state'))) if fresh else ('断线/状态超时' if snapshot else '等待连接')
+    emergency = snapshot.get('emergency_status', {}) if fresh else {}
+    fence_abort = (emergency.get('active') and emergency.get('code') == 'abort' and
+                   any(s.get('source') == 'geofence_monitor' for s in emergency.get('sources', []) if isinstance(s, dict)))
+    if fence_abort:
+        state = '车辆越界'
     lines = ['Jetson 设备状态（只读，Ctrl+C退出）', '=' * 58,
              '设备：{}    状态接收距今：{}'.format(state, '{:.1f}s'.format(age) if snapshot else '—')]
     if not fresh:
@@ -81,7 +86,7 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
         if detail:
             lines.append('连接：' + detail)
         return '\n'.join(lines)
-    lines += ['原因：' + fault_summary(snapshot),
+    lines += ['原因：' + ('车辆触发电子围栏' if fence_abort else fault_summary(snapshot)),
               '车辆模式：' + label(snapshot.get('vehicle_state'))]
     network = snapshot.get('network_status', {})
     if network.get('severity') == 'warning':
@@ -125,6 +130,7 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
             lines.append('  当前无新鲜有效草捆目标')
         if bale.get('blocking_reasons'):
             lines.append('  未就绪原因：' + ', '.join(bale['blocking_reasons']))
+    lines.append('-' * 58)
     for key, name in [('rtk', 'RTK'), ('lidar', '激光雷达'), ('ultrasonic', '超声波'), ('can', 'CAN')]:
         item = snapshot.get('peripherals', {}).get(key, {})
         lines.append('{}：{}    数据年龄：{} ms'.format(name, label(item.get('state')), item.get('data_age_ms', '—')))
@@ -138,11 +144,39 @@ def render(snapshot, age, execution, execution_age, detail='', show_diagnostics=
         for error in item.get('errors', []):
             lines.append('  {}：{}'.format(error.get('code', ''), error.get('message', '')))
     obstacle = snapshot.get('obstacle_warning', {})
-    lines += ['-' * 58, '障碍物预警：{}（仅显示预警）'.format(label(obstacle.get('state')))]
+    lines += ['-' * 58, '障碍物预警：']
     for key, name in [('front_left', '左前'), ('front_right', '右前'), ('rear_left', '左后'), ('rear_right', '右后')]:
         distance = obstacle.get('distances_m', {}).get(key)
-        lines.append('{}：{}  {}'.format(name, '{:.2f} m'.format(distance) if isinstance(distance, (int, float)) else '—',
-                     label(obstacle.get('channel_states', {}).get(key))))
+        state = obstacle.get('channel_states', {}).get(key)
+        suffix = '' if state in (None, 'unknown') else '  ' + label(state)
+        lines.append('{}：{}{}'.format(name, '{:.2f} m'.format(distance) if isinstance(distance, (int, float)) else '—', suffix))
+    fence = snapshot.get('geofence') or {}
+    distance = fence.get('distance_to_boundary_m')
+    if fence.get('fresh') and isinstance(distance, (int, float)):
+        if fence.get('code') == 'OUTSIDE':
+            state = '已越界'
+        elif fence.get('warning'):
+            state = '警告，已靠近边界'
+        else:
+            state = '安全'
+        lines.append('电子围栏：{}，距边界 {:.2f} m'.format(state, distance))
+    else:
+        lines.append('电子围栏：状态未知（定位或围栏数据不可用/超时）')
+    trigger = {'outside_boundary': '越出围栏边界', 'disabled': '已禁用'}.get(fence.get('emergency_trigger'), '未知')
+    lines.append('  预警阈值：距边界小于 5.00 m；越界急停：' + trigger)
+    lines += ['-' * 58, '障碍物报警记录（最近5条，本次运行）']
+    names = {'front_left': '左前', 'front_right': '右前', 'rear_left': '左后', 'rear_right': '右后'}
+    history = snapshot.get('obstacle_history', [])
+    for event in history[-5:]:
+        distance = event.get('distance_m')
+        try:
+            when = datetime.fromisoformat(event.get('timestamp', '').replace('Z', '+00:00')).astimezone().strftime('%H:%M:%S')
+        except (ValueError, TypeError):
+            when = '—'
+        lines.append('{} {}：{} {}'.format(when, names.get(event.get('channel'), '未知'),
+                     label(event.get('state')), '{:.2f} m'.format(distance) if isinstance(distance, (int, float)) else '—'))
+    if not history:
+        lines.append('暂无报警记录')
     if show_diagnostics:
         events = snapshot.get('diagnostics', {}).get('events', [])
         lines += ['-' * 58, '最近诊断记录（历史记录，不代表当前故障）']

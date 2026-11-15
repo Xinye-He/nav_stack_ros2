@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -11,10 +12,12 @@ from types import SimpleNamespace
 
 import rclpy
 from rcl_interfaces.msg import Log
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String, Bool
 from websockets.legacy.server import serve
 
-from obstacle_warning import summarize
+from obstacle_warning import summarize, ObstacleHistory
 from health_monitor import StartupHealthCheck
 from status_model import vehicle_state, fault_presentation
 from status_diagnostics import DiagnosticEvents
@@ -45,7 +48,7 @@ def gga_quality(sentence):
 
 
 class StatusService(StartupHealthCheck):
-    def __init__(self, startup_timeout, runtime_timeout, obstacle_threshold=0.5, obstacle_warning_threshold=2.0):
+    def __init__(self, startup_timeout, runtime_timeout, obstacle_threshold=1.0, obstacle_warning_threshold=2.0):
         args = SimpleNamespace(node_name='device_status_monitor', check_fix=True, check_heading=True,
             check_lidar=True, check_ultrasonic=True, check_can=True,
             fix_topic='/fix', heading_topic='/heading_deg', lidar_topic='/rslidar_points',
@@ -58,6 +61,8 @@ class StatusService(StartupHealthCheck):
         self.obstacle_received = None
         self.obstacle_threshold = obstacle_threshold
         self.obstacle_warning_threshold = obstacle_warning_threshold
+        self.obstacle_history = ObstacleHistory()
+        self.obstacle_history_run = None
         self.reset_guard_pub = None
         self.network_event = None
         self.pending_network_ack = None
@@ -65,6 +70,9 @@ class StatusService(StartupHealthCheck):
         self.control_time = None
         self.bale_status = None
         self.bale_status_time = None
+        self.fence_status = None
+        self.fence_status_time = None
+        self.center_fix_time = None
         self.gga_code = None
         self.gga_time = None
         self.link_ok = False
@@ -77,6 +85,8 @@ class StatusService(StartupHealthCheck):
         self.reset_guard_pub = self.create_publisher(Bool, '/safety/reset_peripherals_ready', 10)
         self.create_subscription(String, '/vehicle/execution_status', self.on_control, 10)
         self.create_subscription(String, '/bale_controller/status', self.on_bale_status, 10)
+        self.create_subscription(String, '/geofence/status', self.on_fence_status, 10)
+        self.create_subscription(NavSatFix, '/fix_center', self.on_center_fix, qos_profile_sensor_data)
         self.create_subscription(Bool, '/network_link_ok', self.on_link, 10)
         self.create_subscription(String, '/safety/network_result', self.on_network_event, 10)
         self.create_subscription(String, '/vehicle/reset_result', self.on_reset_result, 10)
@@ -89,12 +99,29 @@ class StatusService(StartupHealthCheck):
         super().ultrasonic_cb(msg)
         self.obstacle_received = time.monotonic()
         self.obstacle_ranges = list(msg.data[:4]) if len(msg.data) >= 4 else None
+        self.obstacle_history.update(summarize(
+            self.obstacle_ranges, self.obstacle_received, self.obstacle_received,
+            self.args.runtime_timeout, self.obstacle_threshold, self.obstacle_warning_threshold))
 
     def on_nmea(self, msg):
         quality = gga_quality(msg.data)
         if quality is not None:
             self.gga_code = quality
             self.gga_time = time.monotonic()
+
+    def on_center_fix(self, msg):
+        if msg.status.status >= 0 and math.isfinite(msg.latitude) and math.isfinite(msg.longitude):
+            self.center_fix_time = time.monotonic()
+        else:
+            self.center_fix_time = None
+
+    def on_fence_status(self, msg):
+        try:
+            value = json.loads(msg.data)
+            if isinstance(value, dict) and value.get('code') in ('INSIDE', 'NEAR_BOUNDARY', 'OUTSIDE', 'POSITION_UNKNOWN'):
+                self.fence_status, self.fence_status_time = value, time.monotonic()
+        except (ValueError, TypeError):
+            pass
 
     def on_bale_status(self, msg):
         try:
@@ -126,6 +153,12 @@ class StatusService(StartupHealthCheck):
     def on_reset_result(self, msg):
         try:
             value = json.loads(msg.data)
+            if (isinstance(value, dict) and value.get('type') == 'reset_estop_result'
+                    and value.get('ok') is True and value.get('drive_state') == 0
+                    and value.get('estop') is False):
+                self.obstacle_history.clear()
+                if self.snapshot:
+                    self.snapshot['obstacle_history'] = []
             if isinstance(value, dict) and value.get('ok') and value.get('cleared_reason') in ('', 'drive_cmd','network_disconnected','network_heartbeat_timeout','network_unconfirmed'):
                 self.pending_network_ack = (value, time.monotonic())
         except (ValueError, TypeError):
@@ -150,6 +183,10 @@ class StatusService(StartupHealthCheck):
         lifecycle = read()
         if not lifecycle:
             lifecycle = update('starting', '等待外设启动', phase='initializing')
+        run_key = (lifecycle.get('boot_id'), lifecycle.get('launch_at'))
+        if self.obstacle_history_run is not None and run_key != self.obstacle_history_run:
+            self.obstacle_history.clear()
+        self.obstacle_history_run = run_key
         state = lifecycle['device_state']
         grace = now - self.start_time < self.args.startup_timeout
         peripherals = self.peripheral_status(self.args.runtime_timeout, grace)
@@ -225,7 +262,24 @@ class StatusService(StartupHealthCheck):
         state = lifecycle['device_state']
         self.diagnostics.set_boot(lifecycle['boot_id'])
         emergency = fault_presentation(self.control, control_fresh, self.diagnostics.snapshot()['events'])
+        obstacle = summarize(self.obstacle_ranges, self.obstacle_received, now,
+                             self.args.runtime_timeout, self.obstacle_threshold,
+                             self.obstacle_warning_threshold)
+        obstacle_history = self.obstacle_history.update(obstacle)
+        fence_fresh = (self.fence_status_time is not None and now - self.fence_status_time <= 2.0
+                       and self.center_fix_time is not None and now - self.center_fix_time <= 2.0)
+        fence = dict(self.fence_status or {})
+        distance = fence.get('distance_to_boundary_m')
+        if not fence_fresh or not isinstance(distance, (float, int)) or isinstance(distance, bool) or not math.isfinite(distance) or distance < 0:
+            fence.update(fresh=False, distance_to_boundary_m=None, warning=False)
+        else:
+            fence.update(fresh=True, warning=fence.get('code') == 'OUTSIDE' or distance < 5.0)
+        fence['display_warning_margin_m'] = 5.0
+        fence['emergency_trigger'] = ('outside_boundary' if fence.get('abort_on_outside') is True
+                                      else 'disabled' if fence.get('abort_on_outside') is False else 'unknown')
         self.snapshot = {'emergency_status': emergency,
+            'geofence': fence,
+            'obstacle_history': obstacle_history,
             'bale_status': dict(self.bale_status or {}, fresh=self.bale_status_time is not None and now - self.bale_status_time <= 2.0),
             'device_state_label': ('紧急触发' if emergency['code'] == 'drive_cmd' else emergency['message']) if emergency['active'] else {'runtime_fault': '运行故障：'+lifecycle.get('device_message', ''), 'ready': '就绪', 'starting': '启动中', 'startup_failed': '启动失败：'+lifecycle.get('device_message', '')}.get(state, state),
             'type': 'device_status', 'version': 1,
@@ -237,9 +291,7 @@ class StatusService(StartupHealthCheck):
                 self.link_time is not None and now - self.link_time < 1.5, self.network_event),
             'diagnostics': self.diagnostics.snapshot(),
             'execution_status': dict(self.control, fresh=control_fresh),
-            'obstacle_warning': summarize(self.obstacle_ranges, self.obstacle_received, now,
-                                          self.args.runtime_timeout, self.obstacle_threshold,
-                                          self.obstacle_warning_threshold)}
+            'obstacle_warning': obstacle}
 
     def packet(self):
         if not self.snapshot:
@@ -289,7 +341,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=9011)
     parser.add_argument('--startup-timeout', type=float, default=5.0)
     parser.add_argument('--runtime-timeout', type=float, default=2.0)
-    parser.add_argument('--obstacle-threshold-m', type=float, default=0.5, help='仅显示预警，不联动停车')
+    parser.add_argument('--obstacle-threshold-m', type=float, default=1.0, help='障碍物报警显示阈值，默认与超声波接管阈值一致')
     parser.add_argument('--obstacle-warning-threshold-m', type=float, default=2.0, help='警告距离上限（含等于），仅显示')
     parser.add_argument('--state-file', default=os.environ.get('NAV_STATUS_FILE', '/tmp/nav_device_status.json'))
     args = parser.parse_args()

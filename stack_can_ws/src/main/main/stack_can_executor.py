@@ -82,6 +82,8 @@ class StackCanExecutor(Node):
         self.remote_req    = False  # 实体遥控
         self.teleop_active = False  # 上位机接管
         self.bale_active   = False  # 草捆对准接管
+        self.ultrasonic_alarm = False
+        self.ultrasonic_takeover_count = 0
 
         # 安全锁存 / 裁决状态
         self.abort_req = False
@@ -113,6 +115,9 @@ class StackCanExecutor(Node):
         self.create_subscription(Bool, '/remote_req', lambda m: setattr(self, 'remote_req', bool(m.data)), 1)
         self.create_subscription(Bool, '/teleop_active', lambda m: setattr(self, 'teleop_active', bool(m.data)), 1)
         self.create_subscription(Bool, '/bale_active', lambda m: setattr(self, 'bale_active', bool(m.data)), 1)
+        self.ultrasonic_drive_pub = self.create_publisher(UInt8, '/drive_cmd', 10)
+        self.ultrasonic_takeover_pub = self.create_publisher(Bool, '/ultrasonic/takeover', 10)
+        self.create_subscription(Bool, '/ultrasonic_obstacle_near', self._on_ultrasonic_alarm, 10)
 
         self.paused_reset_guards = {}
         for topic, name in (('/geofence_ok', '围栏'), ('/network_link_ok', '9010链路'),
@@ -141,6 +146,24 @@ class StackCanExecutor(Node):
     def _on_traj_cmd(self, msg: StackCommand):
         self.cmd_traj = msg
         self.path_control.traj_received = time.monotonic()
+
+    def _on_ultrasonic_alarm(self, msg: Bool):
+        alarm = bool(msg.data)
+        rising = alarm and not self.ultrasonic_alarm
+        self.ultrasonic_alarm = alarm
+        if not rising:
+            return
+        self.cmd_teleop = self._make_stop_command()
+        self.teleop_source = 'websocket_9010'
+        self.teleop_active = True
+        self.bale_active = False
+        self.ultrasonic_takeover_count += 1
+        # Preserve any pre-existing independent ESTOP; never clear an abort latch.
+        if not self.estop_latched and not self.abort_req and self.drive_state != self.DS_ESTOP:
+            self.drive_state = self.DS_PAUSED
+            self.ultrasonic_drive_pub.publish(UInt8(data=self.DS_PAUSED))
+        self.ultrasonic_takeover_pub.publish(Bool(data=True))
+        self.get_logger().warn('Ultrasonic alarm: zero command and switch to operator control; preserve ESTOP')
 
     def _on_teleop_cmd(self, msg: StackCommand):
         self.cmd_teleop = msg
@@ -331,6 +354,8 @@ class StackCanExecutor(Node):
             'last_paused_reset_request_id': self.last_paused_reset_request_id,
             'safety_state': self.safety_state, 'control_mode': self.control_mode,
             'drive_state': self.drive_state, 'command_source': self.teleop_source,
+            'ultrasonic_alarm': self.ultrasonic_alarm,
+            'ultrasonic_takeover_count': self.ultrasonic_takeover_count,
             'estop_reason': self.estop_reason,
             'remote_req': self.remote_req,
             'network_neutral_active': self.network_safety.neutral,

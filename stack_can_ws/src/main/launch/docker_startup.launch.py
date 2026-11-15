@@ -74,10 +74,10 @@ def generate_launch_description():
             parameters=[{
                 'port': '/dev/ttyTHS0',
                 'baudrate': 9600,
-                'alpha': 0.3,
-                'near_threshold_m': 0.50,
+                'alpha': 1.0,
+                'near_threshold_m': 1.0,
                 'jump_reject_m': 1.0,
-                'enable_jump_reject': True,
+                'enable_jump_reject': False,
                 'publish_rate_hz': 20.0,
             }],
         ),

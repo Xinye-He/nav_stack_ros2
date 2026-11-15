@@ -246,14 +246,13 @@ class GeofenceMonitor(Node):
         py = float(self.py_enu)
 
         inside = point_in_polygon(px, py, self.fence_xy)
+        dmin = self.compute_min_distance_to_edges(px, py, self.fence_xy)
         if not inside:
             # 越界
-            self.set_state(self.STATE_OUT, ok=False, reason="outside polygon")
+            self.set_state(self.STATE_OUT, ok=False, reason="outside polygon", distance_m=dmin)
             return
 
         # 在多边形内，计算到边界的最近距离
-        dmin = self.compute_min_distance_to_edges(px, py, self.fence_xy)
-
         if dmin < self.warn_margin_m:
             # 临近边界
             self.set_state(self.STATE_WARN, ok=False, reason=f"near boundary, dmin={dmin:.2f}m", distance_m=dmin)
@@ -290,6 +289,7 @@ class GeofenceMonitor(Node):
         self.pub_detail.publish(String(data=json.dumps(dict(
             type='geofence_status', code=code, ok=bool(ok), reason=reason,
             distance_to_boundary_m=distance, required_margin_m=float(self.warn_margin_m),
+            abort_on_outside=bool(self.abort_on_outside),
             gps_topic=self.gps_topic), ensure_ascii=False, allow_nan=False)))
 
         # 状态变化时打 log 并在从 inside/warn -> outside 时触发 /abort

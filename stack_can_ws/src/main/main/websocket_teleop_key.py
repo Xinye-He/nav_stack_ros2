@@ -119,6 +119,7 @@ class WebSocketTeleopBridge(Node):
         self.network_fault_latched = False
         self.last_link_ok_pub = None
         self.last_fault_text = ''
+        self.create_subscription(Bool, '/ultrasonic/takeover', self.on_ultrasonic_takeover, 10)
 
         self.create_timer(0.1, self.link_watchdog_loop)   # 10Hz
 
@@ -143,6 +144,19 @@ class WebSocketTeleopBridge(Node):
         self.publish_drive_cmd()
         self.publish_teleop_active()
         self.publish_teleop_cmd()
+
+    def on_ultrasonic_takeover(self, msg):
+        if not msg.data:
+            return
+        self.zero_teleop()
+        self.input_source = 'websocket'
+        self.teleop_active = True
+        if self.drive_state != 2:
+            self.drive_state = 0
+            self.publish_drive_cmd()
+        self.publish_teleop_cmd()
+        self.publish_teleop_active()
+        self.get_logger().warn('Ultrasonic alarm: operator control selected with zero command and pause')
 
     def _on_paused_reset_result(self, msg):
         try:

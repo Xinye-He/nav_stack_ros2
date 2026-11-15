@@ -1,16 +1,40 @@
 """Display-only four-level distance warning. Does not change health or control."""
 import math
+from collections import deque
+from datetime import datetime, timezone
 CHANNELS=('front_left','front_right','rear_left','rear_right')
 
-def summarize(values, received_at, now, timeout=2.0, threshold=0.5, warning_threshold=2.0):
+
+class ObstacleHistory:
+    """Record new per-channel warning/alarm transitions, independently of live state."""
+    def __init__(self, limit=50):
+        self.events = deque(maxlen=limit)
+        self.previous = {name: 'unknown' for name in CHANNELS}
+
+    def clear(self):
+        # Keep current channel states: an ongoing obstacle remains visible live,
+        # but clearing history alone must not recreate the same event every tick.
+        self.events.clear()
+
+    def update(self, current):
+        for name in CHANNELS:
+            state = current['channel_states'][name]
+            if state != self.previous[name] and state in ('warning', 'alarm'):
+                self.events.append({'timestamp': datetime.now(timezone.utc).isoformat(),
+                                    'channel': name, 'state': state,
+                                    'distance_m': current['distances_m'][name]})
+            self.previous[name] = state
+        return list(self.events)
+
+def summarize(values, received_at, now, timeout=2.0, threshold=1.0, warning_threshold=2.0):
     age=None if received_at is None else max(0.0,now-received_at)
     fresh=age is not None and age <= timeout
     distances={name:None for name in CHANNELS}
     if fresh and values is not None:
         for name,value in zip(CHANNELS,values):
-            if math.isfinite(value) and value > 0:
+            if math.isfinite(value) and value >= 0:
                 distances[name]=float(value)
-    states={name:('unknown' if value is None else
+    states={name:('unknown' if value is None or value <= 0 else
                   'alarm' if value < threshold else
                   'warning' if value <= warning_threshold else 'clear')
             for name,value in distances.items()}

@@ -43,7 +43,7 @@ class BaleAlignController(Node):
         self.declare_parameter('angle_lpf_alpha', 0.25)
 
         # 对准判定（双阈值滞回）
-        self.declare_parameter('align_enter_deg', 2.0)
+        self.declare_parameter('align_enter_deg', 3.0)
         self.declare_parameter('align_exit_deg', 6.0)
 
         # 固定转向周期参数（基于你的实测）
@@ -107,6 +107,9 @@ class BaleAlignController(Node):
         self.at_task_waiting = False
         self.drive_state = self.DS_PAUSED
         self.abort_req = False
+        self.abort_generation = 0
+        self.pending_paused_resets = {}
+        self.early_paused_results = {}
         self.current_target: Optional[BaleTarget] = None
         self.last_target_recv_time = None
         self.no_target_since = None
@@ -119,6 +122,8 @@ class BaleAlignController(Node):
         self.create_subscription(UInt8, '/drive_cmd', self.on_drive_cmd, 1)
         self.create_subscription(Bool, '/abort', self.on_abort, 1)
         self.create_subscription(Bool, '/reset_estop', self.on_reset_estop, 1)
+        self.create_subscription(String, '/reset_estop_paused', self.on_paused_reset_request, 10)
+        self.create_subscription(String, '/vehicle/reset_result', self.on_paused_reset_result, 10)
         self.create_subscription(Bool, '/bale/retry', self.on_retry, 10)
 
         # --------------------------------------------------
@@ -230,15 +235,56 @@ class BaleAlignController(Node):
         self.drive_state = int(msg.data)
         if self.drive_state == self.DS_ESTOP:
             self.abort_req = True
+            self.abort_generation += 1
 
     def on_abort(self, msg: Bool):
         if bool(msg.data):
             self.abort_req = True
+            self.abort_generation += 1
             self.drive_state = self.DS_ESTOP
 
     def on_reset_estop(self, msg: Bool):
         if bool(msg.data):
             self.abort_req = False
+
+    def on_paused_reset_request(self, msg: String):
+        try:
+            request_id = json.loads(msg.data)['request_id']
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+                return
+        except (ValueError, TypeError, KeyError):
+            return
+        now = time.monotonic()
+        self.pending_paused_resets = {k: v for k, v in self.pending_paused_resets.items() if now - v[1] <= 5.0}
+        self.pending_paused_resets[request_id] = (self.abort_generation, now)
+        early = self.early_paused_results.pop(request_id, None)
+        if early is not None and now - early[1] <= 5.0 and early[0] == self.abort_generation:
+            self.on_paused_reset_result(String(data=json.dumps(early[2])))
+
+    def on_paused_reset_result(self, msg: String):
+        try:
+            result = json.loads(msg.data)
+            request_id = result['request_id']
+            if not isinstance(request_id, str):
+                return
+        except (ValueError, TypeError, KeyError):
+            return
+        pending = self.pending_paused_resets.pop(request_id, None)
+        if result.get('ok') is not True or result.get('drive_state') != self.DS_PAUSED or result.get('estop') is not False:
+            return
+        if pending is None:
+            now = time.monotonic()
+            self.early_paused_results = {k: v for k, v in self.early_paused_results.items() if now - v[1] <= 5.0}
+            if len(self.early_paused_results) >= 32:
+                self.early_paused_results.pop(next(iter(self.early_paused_results)))
+            self.early_paused_results[request_id] = (self.abort_generation, now, result)
+            return
+        if (time.monotonic() - pending[1] > 5.0 or pending[0] != self.abort_generation):
+            return
+        self.abort_req = False
+        self.drive_state = self.DS_PAUSED
+        self.set_active(False)
+        self.get_logger().info('Paused reset confirmed; bale abort cleared, remaining paused')
 
     # --------------------------------------------------
     # 工具函数
@@ -366,7 +412,7 @@ class BaleAlignController(Node):
     # --------------------------------------------------
     # 固定转向周期
     # --------------------------------------------------
-    def start_turn_cycle(self, direction: str):
+    def start_turn_cycle(self, direction: str, large_angle: bool = False):
         """
         direction: 'LEFT' or 'RIGHT'
         """
@@ -375,7 +421,8 @@ class BaleAlignController(Node):
 
         self.exec_mode = f'TURN_{direction}'
         self.turn_phase = 'PULSE'
-        self.turn_frames_left = self.turn_pulse_frames
+        self.turn_frames_left = 7 if large_angle else self.turn_pulse_frames
+        self.cycle_pause_frames = 2 if large_angle else self.turn_pause_frames
 
         sign = -1 if direction == 'LEFT' else 1
         est_yaw = sign * self.turn_cycle_yaw_deg
@@ -383,8 +430,8 @@ class BaleAlignController(Node):
         self.get_logger().info(
             f'start turn cycle: {direction}, '
             f'cmd={sign*self.turn_cmd_angle_deg:.1f} deg, '
-            f'frames={self.turn_pulse_frames}+{self.turn_pause_frames}, '
-            f'est_yaw={est_yaw:+.2f} deg/cycle'
+            f'frames={self.turn_frames_left}+{self.cycle_pause_frames}, '
+            f'5-frame reference yaw={est_yaw:+.2f} deg'
         )
 
     def step_turn_cycle(self, dist: float):
@@ -412,7 +459,7 @@ class BaleAlignController(Node):
 
             if self.turn_frames_left <= 0:
                 self.turn_phase = 'PAUSE'
-                self.turn_frames_left = self.turn_pause_frames
+                self.turn_frames_left = self.cycle_pause_frames
 
             return True
 
@@ -470,6 +517,9 @@ class BaleAlignController(Node):
         # --------------------------------------
         # 1) 已进入 pick_action 保持阶段
         # --------------------------------------
+        if self.pick_action_sent_time is not None and self.drive_state != self.DS_RUNNING:
+            self.publish_pick_reset_cmd('paused during pickup')
+            return
         if self.pick_action_sent_time is not None:
             self.set_active(True)
 
@@ -619,6 +669,7 @@ class BaleAlignController(Node):
                 self.pub_bale_cmd.publish(self.make_cmd(0.0, 0.0, dist))
                 return
             samples = self.decision_samples
+            large_angle = all(abs(value) > 6.0 for value in samples)
             self.decision_samples = []
             self.decision_last = None
             self.decision_last_target_time = None
@@ -627,12 +678,12 @@ class BaleAlignController(Node):
             else:
                 self.align_confirm_count = 0
             if not self.aligned_state and sum(samples) < 0.0:
-                self.start_turn_cycle('LEFT')
+                self.start_turn_cycle('LEFT', large_angle)
                 self.step_turn_cycle(dist)
                 return
 
             if not self.aligned_state and sum(samples) > 0.0:
-                self.start_turn_cycle('RIGHT')
+                self.start_turn_cycle('RIGHT', large_angle)
                 self.step_turn_cycle(dist)
                 return
 
